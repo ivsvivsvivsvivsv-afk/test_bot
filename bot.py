@@ -6,7 +6,7 @@ from datetime import datetime
 
 # Получаем токен из переменной окружения
 API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
+ADMIN_IDS = os.getenv('ADMIN_IDS', '0')
 bot = telebot.TeleBot(API_TOKEN)
 
 # База пользователей
@@ -192,11 +192,10 @@ def is_valid_email(email):
 def send_lead_to_admin(name, phone, email, path, specialty=None, level=None):
     """Отправляет лид в Telegram всем админам"""
     try:
-        # Получаем список ID админов (через запятую)
-        admin_ids_str = os.getenv('ADMIN_IDS', '0')
+        admin_ids_str = ADMIN_IDS
         admin_ids = [int(id.strip()) for id in admin_ids_str.split(',') if id.strip().isdigit()]
         
-        if not admin_ids or admin_ids == [0]:
+        if not admin_ids:
             print("[WARNING] ADMIN_IDS не установлены в переменных окружения!")
             return False
         
@@ -212,7 +211,6 @@ def send_lead_to_admin(name, phone, email, path, specialty=None, level=None):
             f"💬 Задача: Перезвонить в течение 1 часа и отправить ссылку на вебинар."
         )
         
-        # Отправляем всем админам
         for admin_id in admin_ids:
             try:
                 bot.send_message(admin_id, message, parse_mode='Markdown')
@@ -246,8 +244,15 @@ def handle_start(message):
 @bot.callback_query_handler(func=lambda call: call.data in ['freelancer', 'boss'])
 def handle_path_selection(call):
     chat_id = call.message.chat.id
-    path = call.data
     
+    if chat_id not in users_db:
+        users_db[chat_id] = {
+            'stage': 'start',
+            'name': call.from_user.first_name or "User",
+            'timestamp': datetime.now().isoformat()
+        }
+    
+    path = call.data
     users_db[chat_id]['path'] = path
     users_db[chat_id]['stage'] = path
     
@@ -300,6 +305,14 @@ def handle_freelancer_specialty(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('level_'))
 def handle_level_selection(call):
     chat_id = call.message.chat.id
+    
+    if chat_id not in users_db:
+        users_db[chat_id] = {
+            'stage': 'start',
+            'name': call.from_user.first_name or "User",
+            'timestamp': datetime.now().isoformat()
+        }
+    
     parts = call.data.split('_')
     level = parts[1]
     specialty = '_'.join(parts[2:])
@@ -353,22 +366,6 @@ def handle_user_response(message):
             "и получить билет на БЕСПЛАТНЫЙ открытый урок \"Как стать Нейро-Юнитом\".\n\n"
             "50 подписок будут разыграны прямо на уроке!\n\n"
             "Оставь свои контакты, и я отправлю ссылку на вебинар.",
-            parse_mode='Markdown',
-            reply_markup=markup
-        )
-    
-    elif stage and stage.startswith('level_'):
-        users_db[chat_id]['stage'] = 'ready_for_contacts'
-        
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton('✅ Готово, давай дальше!', callback_data='request_contacts'))
-        
-        bot.send_message(
-            chat_id,
-            "🔥 **МАСТЕРСКИЙ АНАЛИЗ!** Видно, что ты понимаешь рынок.\n\n"
-            "Теперь получи доступ к ЗАКРЫТОМУ вебинару для предпринимателей и владельцев бизнеса.\n\n"
-            "50 мест на ВИП-треке с разбором твоего конкретного бизнеса.\n\n"
-            "Оставь свои контакты!",
             parse_mode='Markdown',
             reply_markup=markup
         )
@@ -429,6 +426,10 @@ def handle_help(message):
 if __name__ == '__main__':
     print("🤖 Бот запущен...")
     try:
-        bot.infinity_polling(skip_pending=True)
+        bot.infinity_polling(skip_pending=True, timeout=30)
+    except KeyboardInterrupt:
+        print("Бот остановлен")
+        bot.stop_polling()
     except Exception as e:
         print(f"❌ Ошибка: {e}")
+        bot.stop_polling()
