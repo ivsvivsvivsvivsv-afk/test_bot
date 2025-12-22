@@ -190,10 +190,14 @@ def is_valid_email(email):
     return re.match(pattern, email)
 
 def send_lead_to_admin(name, phone, email, path, specialty=None, level=None):
-    """Отправляет лид в Telegram админу"""
+    """Отправляет лид в Telegram всем админам"""
     try:
-        if ADMIN_ID == 0:
-            print("[WARNING] ADMIN_ID не установлен в переменных окружения!")
+        # Получаем список ID админов (через запятую)
+        admin_ids_str = os.getenv('ADMIN_IDS', '0')
+        admin_ids = [int(id.strip()) for id in admin_ids_str.split(',') if id.strip().isdigit()]
+        
+        if not admin_ids or admin_ids == [0]:
+            print("[WARNING] ADMIN_IDS не установлены в переменных окружения!")
             return False
         
         message = (
@@ -208,8 +212,14 @@ def send_lead_to_admin(name, phone, email, path, specialty=None, level=None):
             f"💬 Задача: Перезвонить в течение 1 часа и отправить ссылку на вебинар."
         )
         
-        bot.send_message(ADMIN_ID, message, parse_mode='Markdown')
-        print(f"[LEAD] Отправлено админу: {name} ({email})")
+        # Отправляем всем админам
+        for admin_id in admin_ids:
+            try:
+                bot.send_message(admin_id, message, parse_mode='Markdown')
+                print(f"[LEAD] Отправлено админу {admin_id}: {name} ({email})")
+            except Exception as e:
+                print(f"[ERROR] Failed to send to admin {admin_id}: {e}")
+        
         return True
     except Exception as e:
         print(f"[ERROR] Lead send error: {e}")
