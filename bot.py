@@ -27,8 +27,7 @@ PERPLEXITY_INSTRUCTIONS = {
         "4. **Скопируйте промт ниже и вставьте его в Perplexity**\n"
         "5. Нажмите Enter и дождитесь результата\n"
         "6. Когда Perplexity выдаст ответ, **скопируйте результат и отправьте мне сюда или скриншот**\n\n"
-        "⚡ **В день можно делать 3 глубоких исследования бесплатно!**\n\n"
-        "Готовы? Вот ваше первое задание:"
+        "⚡ **В день можно делать 3 глубоких исследования бесплатно!**"
     )
 }
 
@@ -41,17 +40,20 @@ PROMPTS = {
     ),
     
     'level2_boss': (
-        "Напиши аналитический отчет: Как ИИ-ассистент (нейро-юнит) может сократить расходы "
-        "в компании размером 10-15 человек на 40% в первый год? "
-        "Включи: 1) Где ИИ экономит время, 2) Примеры по должностям, 3) ROI от инвестиции, "
-        "4) Риски и как их избежать."
+        "Я владелец компании размером 10-15 человек. Напиши детальный бизнес-кейс: "
+        "Как ИИ-ассистент может сократить расходы на 40% в первый год? "
+        "Включи: 1) Точные процессы для автоматизации, 2) Расчет экономии по ролям, "
+        "3) ROI и payback period, 4) Внедрение по месяцам, 5) Риски и как их минимизировать, "
+        "6) Примеры реальных компаний которые это сделали."
     ),
     
     'level3_boss': (
-        "Создай стратегию: Как построить систему, где ИИ-ассистенты полностью управляют "
-        "определенными процессами в компании без участия людей? "
-        "Включи: 1) Какие процессы автоматизировать в первую очередь, 2) Метрики успеха, "
-        "3) Как обучить команду работать с таким системам, 4) Расходы и сроки внедрения."
+        "Я CEO компании. Создай стратегию полной трансформации: "
+        "Как построить автономную систему, где ИИ-агенты полностью управляют бизнес-процессами без людей? "
+        "Дай мне: 1) Архитектуру системы (какие ИИ-агенты, как они взаимодействуют), "
+        "2) Какие процессы автоматизировать в первую очередь для MAX ROI, 3) Полный roadmap на 12 месяцев, "
+        "4) Метрики успеха для каждого этапа, 5) Как переучить команду на роль супервизоров ИИ, "
+        "6) Бюджет и точные сроки, 7) Примеры компаний которые масштабировались 10x через ИИ автоматизацию."
     ),
     
     'level1_copywriting': (
@@ -167,10 +169,14 @@ MESSAGES = {
             "Твоя цель: Сокращать расходы, ускорять процессы, масштабировать.\n"
             "Враг: Текучка кадров, ошибки людей, медленные процессы.\n\n"
             "Мы покажем, как ИИ-система может заменить 5 сотрудников и стоить как 1.\n\n"
-            "Готов увидеть, как это работает?"
+            "Готов увидеть, как это работает?\n\n"
+            "Выбери уровень исследования:"
         ),
-        'button_text': '🚀 Начать исследование',
-        'button_callback': 'boss_perplexity'
+        'buttons': [
+            ('📚 Уровень 1: Конкурентный анализ', 'level_1_boss'),
+            ('📘 Уровень 2: Бизнес-кейс с ROI', 'level_2_boss'),
+            ('📕 Уровень 3: Полная трансформация', 'level_3_boss')
+        ]
     },
     
     'perplexity_start': {
@@ -278,11 +284,10 @@ def handle_path_selection(call):
         bot.send_message(chat_id, MESSAGES['freelancer_intro']['text'], parse_mode='Markdown', reply_markup=markup)
     
     elif path == 'boss':
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton(
-            MESSAGES['boss_intro']['button_text'],
-            callback_data=MESSAGES['boss_intro']['button_callback']
-        ))
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for button_text, callback_data in MESSAGES['boss_intro']['buttons']:
+            markup.add(types.InlineKeyboardButton(button_text, callback_data=callback_data))
+        
         bot.send_message(chat_id, MESSAGES['boss_intro']['text'], parse_mode='Markdown', reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data in ['copywriting', 'design', 'marketing', 'analytics'])
@@ -318,54 +323,78 @@ def handle_freelancer_specialty(call):
     
     bot.send_message(chat_id, text, parse_mode='Markdown', reply_markup=markup)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('level_'))
+@bot.callback_query_handler(func=lambda call: call.data.startswith('level_') and not call.data.startswith('level_1_boss') and not call.data.startswith('level_2_boss') and not call.data.startswith('level_3_boss'))
 def handle_level_selection(call):
     chat_id = call.message.chat.id
     parts = call.data.split('_')
-    level = parts
+    level = parts[1]
     specialty = '_'.join(parts[2:])
     
     users_db[chat_id]['current_level'] = level
     users_db[chat_id]['stage'] = f'level_{level}'
     
-    # Отправляем инструкцию по Perplexity
-    bot.send_message(
-        chat_id,
-        MESSAGES['perplexity_start']['text'],
-        parse_mode='Markdown'
-    )
-    
-    # Отправляем промт
+    # 1️⃣ СНАЧАЛА ОТПРАВЛЯЕМ САМО ЗАДАНИЕ
     prompt_key = f'level{level}_{specialty}'
     if prompt_key in PROMPTS:
         prompt = PROMPTS[prompt_key]
         bot.send_message(
             chat_id,
-            f"**ВАШЕ ЗАДАНИЕ УРОВНЯ {level}:**\n\n`{prompt}`\n\n"
-            "Скопируйте этот промт, вставьте в Perplexity и выполните исследование. "
-            "Когда будет готово — пришлите результат или скриншот сюда! ✅",
+            f"🎯 **ВАШЕ ЗАДАНИЕ УРОВНЯ {level}:**\n\n{prompt}",
             parse_mode='Markdown'
         )
-
-@bot.callback_query_handler(func=lambda call: call.data == 'boss_perplexity')
-def handle_boss_perplexity(call):
-    chat_id = call.message.chat.id
-    users_db[chat_id]['stage'] = 'boss_game'
     
+    # 2️⃣ ПОТОМ ИНСТРУКЦИЯ ПО PERPLEXITY
     bot.send_message(
         chat_id,
         MESSAGES['perplexity_start']['text'],
         parse_mode='Markdown'
     )
     
-    prompt = PROMPTS['level1_boss']
+    # 3️⃣ ПОТОМ ПРОМТ В КОДЕ ДЛЯ КОПИРОВАНИЯ
+    if prompt_key in PROMPTS:
+        prompt = PROMPTS[prompt_key]
+        bot.send_message(
+            chat_id,
+            f"**СКОПИРУЙТЕ И ВСТАВЬТЕ В PERPLEXITY:**\n\n``````\n\n"
+            "Когда будет готово — пришлите скриншот или текст результата сюда! ✅",
+            parse_mode='Markdown'
+        )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('level_') and (call.data.startswith('level_1_boss') or call.data.startswith('level_2_boss') or call.data.startswith('level_3_boss')))
+def handle_boss_level_selection(call):
+    chat_id = call.message.chat.id
+    parts = call.data.split('_')
+    level = parts[1]
+    
+    users_db[chat_id]['current_level'] = level
+    users_db[chat_id]['stage'] = f'level_{level}'
+    
+    # 1️⃣ СНАЧАЛА ОТПРАВЛЯЕМ САМО ЗАДАНИЕ
+    prompt_key = f'level{level}_boss'
+    if prompt_key in PROMPTS:
+        prompt = PROMPTS[prompt_key]
+        bot.send_message(
+            chat_id,
+            f"🎯 **ВАШЕ ИССЛЕДОВАНИЕ УРОВНЯ {level}:**\n\n{prompt}",
+            parse_mode='Markdown'
+        )
+    
+    # 2️⃣ ПОТОМ ИНСТРУКЦИЯ ПО PERPLEXITY
     bot.send_message(
         chat_id,
-        f"**ВАШЕ ПЕРВОЕ ИССЛЕДОВАНИЕ:**\n\n`{prompt}`\n\n"
-        "Скопируйте этот промт в Perplexity и выполните анализ. "
-        "Пришлите результат или скриншот! 📸",
+        MESSAGES['perplexity_start']['text'],
         parse_mode='Markdown'
     )
+    
+    # 3️⃣ ПОТОМ ПРОМТ В КОДЕ ДЛЯ КОПИРОВАНИЯ
+    if prompt_key in PROMPTS:
+        prompt = PROMPTS[prompt_key]
+        bot.send_message(
+            chat_id,
+            f"**СКОПИРУЙТЕ И ВСТАВЬТЕ В PERPLEXITY:**\n\n``````\n\n"
+            "Когда будет готово — пришлите скриншот или текст результата сюда! 📸",
+            parse_mode='Markdown'
+        )
 
 @bot.message_handler(content_types=['text', 'photo', 'document'])
 def handle_user_response(message):
@@ -392,22 +421,6 @@ def handle_user_response(message):
             "и получить билет на БЕСПЛАТНЫЙ открытый урок \"Как стать Нейро-Юнитом\".\n\n"
             "50 подписок будут разыграны прямо на уроке!\n\n"
             "Оставь свои контакты, и я отправлю ссылку на вебинар.",
-            parse_mode='Markdown',
-            reply_markup=markup
-        )
-    
-    elif stage == 'boss_game':
-        users_db[chat_id]['stage'] = 'ready_for_contacts'
-        
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton('✅ Готово, давай дальше!', callback_data='request_contacts'))
-        
-        bot.send_message(
-            chat_id,
-            "🔥 **МАСТЕРСКИЙ АНАЛИЗ!** Видно, что ты понимаешь рынок.\n\n"
-            "Теперь получи доступ к ЗАКРЫТОМУ вебинару для предпринимателей и владельцев бизнеса.\n\n"
-            "50 мест на ВИП-треке с разбором твоего конкретного бизнеса.\n\n"
-            "Оставь свои контакты!",
             parse_mode='Markdown',
             reply_markup=markup
         )
@@ -469,6 +482,6 @@ def handle_help(message):
 if __name__ == '__main__':
     print("🤖 Бот запущен...")
     try:
-        bot.infinity_polling()
+        bot.infinity_polling(skip_pending=True)
     except Exception as e:
         print(f"❌ Ошибка: {e}")
