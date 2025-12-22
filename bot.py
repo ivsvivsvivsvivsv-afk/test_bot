@@ -2,6 +2,7 @@ import telebot
 from telebot import types
 import os
 import re
+import time
 from datetime import datetime
 
 # Получаем токен из переменной окружения
@@ -409,7 +410,10 @@ def handle_user_response(message):
 @bot.callback_query_handler(func=lambda call: call.data == 'request_contacts')
 def handle_request_contacts(call):
     chat_id = call.message.chat.id
-    users_db[chat_id]['stage'] = 'waiting_for_phone'
+    if chat_id not in users_db:
+        users_db[chat_id] = {'stage': 'waiting_for_phone', 'name': call.from_user.first_name or "User"}
+    else:
+        users_db[chat_id]['stage'] = 'waiting_for_phone'
     
     bot.send_message(chat_id, "Твой номер телефона (с кодом страны):", parse_mode='Markdown')
 
@@ -426,10 +430,31 @@ def handle_help(message):
 if __name__ == '__main__':
     print("🤖 Бот запущен...")
     try:
-        bot.infinity_polling(skip_pending=True, timeout=30)
+        # Пытаемся остановить старые polling'и
+        try:
+            bot.stop_polling()
+            time.sleep(2)
+        except:
+            pass
+        
+        # Запускаем новый polling
+        print("[INFO] Запуск polling...")
+        bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
+    
     except KeyboardInterrupt:
-        print("Бот остановлен")
+        print("\n[INFO] Получен сигнал остановки")
         bot.stop_polling()
+    
     except Exception as e:
-        print(f"❌ Ошибка: {e}")
-        bot.stop_polling()
+        error_str = str(e)
+        if "409" in error_str:
+            print("[ERROR] Конфликт polling'а (409)!")
+            print("[ERROR] Убедитесь, что нет других инстансов бота!")
+            print("[ERROR] Дождитесь 30 секунд и перезапустите")
+        else:
+            print(f"[ERROR] Ошибка: {e}")
+        
+        try:
+            bot.stop_polling()
+        except:
+            pass
