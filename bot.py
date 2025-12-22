@@ -2,15 +2,11 @@ import telebot
 from telebot import types
 import os
 import re
-import smtplib
 from datetime import datetime
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 
 # Получаем токен из переменной окружения
 API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-MANAGER_EMAIL = os.getenv('MANAGER_EMAIL', 'manager@example.com')
-SMTP_PASSWORD = os.getenv('SMTP_PASSWORD', '')
+ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
 bot = telebot.TeleBot(API_TOKEN)
 
 # База пользователей
@@ -169,7 +165,6 @@ MESSAGES = {
             "Твоя цель: Сокращать расходы, ускорять процессы, масштабировать.\n"
             "Враг: Текучка кадров, ошибки людей, медленные процессы.\n\n"
             "Мы покажем, как ИИ-система может заменить 5 сотрудников и стоить как 1.\n\n"
-            "Готов увидеть, как это работает?\n\n"
             "Выбери уровень исследования:"
         ),
         'buttons': [
@@ -181,22 +176,6 @@ MESSAGES = {
     
     'perplexity_start': {
         'text': PERPLEXITY_INSTRUCTIONS['how_to_start']
-    },
-    
-    'success': {
-        'text': (
-            "✅ **ИССЛЕДОВАНИЕ ЗАВЕРШЕНО!**\n\n"
-            "Ты доказал, что можешь работать с ИИ на экспертном уровне.\n\n"
-            "🎯 **БЕСПЛАТНЫЙ ОТКРЫТЫЙ УРОК: Как стать Нейро-Юнитом**\n\n"
-            "📅 **Когда:** Среда, 19:00 МСК\n"
-            "🔗 **Где:** Zoom\n"
-            "⏱ **Длительность:** 90 минут\n\n"
-            "**ЧТО ТЫ УЗНАЕШЬ:**\n"
-            "• Как я заработал $50k в месяц на 1 ИИ-помощнике\n"
-            "• Какие skills нужны современному фрилансеру\n"
-            "• Как получить подписку Perplexity Pro на ГОД (стоимость $200) — раздам 50 подписок!\n\n"
-            "**Чтобы получить ссылку на урок и гарантировать место — оставь свои контакты:**"
-        )
     }
 }
 
@@ -210,35 +189,30 @@ def is_valid_email(email):
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     return re.match(pattern, email)
 
-def send_lead_email(name, phone, email, path, specialty=None, level=None):
-    """Отправляет лид в Telegram"""
+def send_lead_to_admin(name, phone, email, path, specialty=None, level=None):
+    """Отправляет лид в Telegram админу"""
     try:
-        # Твой Telegram ID (админа бота)
-        ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
-        
         if ADMIN_ID == 0:
             print("[WARNING] ADMIN_ID не установлен в переменных окружения!")
             return False
         
-        message = f"""
-🔥 **НОВЫЙ ЛИД**
-
-👤 Имя: {name}
-📱 Телефон: {phone}
-📧 Email: {email}
-🎯 Тип: {path}
-💼 Специальность: {specialty or '-'}
-📚 Уровень: {level or '-'}
-⏰ Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-💬 Задача: Перезвонить в течение 1 часа и отправить ссылку на вебинар.
-        """
+        message = (
+            f"🔥 **НОВЫЙ ЛИД**\n\n"
+            f"👤 Имя: {name}\n"
+            f"📱 Телефон: {phone}\n"
+            f"📧 Email: {email}\n"
+            f"🎯 Тип: {path}\n"
+            f"💼 Специальность: {specialty or '-'}\n"
+            f"📚 Уровень: {level or '-'}\n"
+            f"⏰ Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"💬 Задача: Перезвонить в течение 1 часа и отправить ссылку на вебинар."
+        )
         
         bot.send_message(ADMIN_ID, message, parse_mode='Markdown')
         print(f"[LEAD] Отправлено админу: {name} ({email})")
         return True
     except Exception as e:
-        print(f"Lead send error: {e}")
+        print(f"[ERROR] Lead send error: {e}")
         return False
 
 # ===== ОБРАБОТЧИКИ =====
@@ -303,8 +277,7 @@ def handle_freelancer_specialty(call):
         "**Уровень 2:** Глубокий анализ и стратегия\n"
         "**Уровень 3:** Полная система автоматизации\n\n"
         "Каждый уровень — это одно глубокое исследование в Perplexity. "
-        "Выполнишь все 3 — получишь билет на курс + шанс выиграть подписку Perplexity Pro на ГОД ($200)! 🎁\n\n"
-        "Начинаем с уровня 1?"
+        "Выполнишь все 3 — получишь билет на курс + шанс выиграть подписку Perplexity Pro на ГОД ($200)! 🎁"
     )
     
     markup = types.InlineKeyboardMarkup(row_width=1)
@@ -314,7 +287,7 @@ def handle_freelancer_specialty(call):
     
     bot.send_message(chat_id, text, parse_mode='Markdown', reply_markup=markup)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('level_1_') or call.data.startswith('level_2_') or call.data.startswith('level_3_'))
+@bot.callback_query_handler(func=lambda call: call.data.startswith('level_'))
 def handle_level_selection(call):
     chat_id = call.message.chat.id
     parts = call.data.split('_')
@@ -324,29 +297,25 @@ def handle_level_selection(call):
     users_db[chat_id]['current_level'] = level
     users_db[chat_id]['stage'] = f'level_{level}'
     
-    # 1️⃣ СНАЧАЛА ОТПРАВЛЯЕМ САМО ЗАДАНИЕ
     prompt_key = f'level{level}_{specialty}'
     if prompt_key in PROMPTS:
         prompt = PROMPTS[prompt_key]
+        
         bot.send_message(
             chat_id,
             f"🎯 **ВАШЕ ЗАДАНИЕ УРОВНЯ {level}:**\n\n{prompt}",
             parse_mode='Markdown'
         )
-    
-    # 2️⃣ ПОТОМ ИНСТРУКЦИЯ ПО PERPLEXITY
-    bot.send_message(
-        chat_id,
-        MESSAGES['perplexity_start']['text'],
-        parse_mode='Markdown'
-    )
-    
-    # 3️⃣ ПОТОМ ПРОМТ В КОДЕ ДЛЯ КОПИРОВАНИЯ
-    if prompt_key in PROMPTS:
-        prompt = PROMPTS[prompt_key]
+        
         bot.send_message(
             chat_id,
-            f"**СКОПИРУЙТЕ И ВСТАВЬТЕ В PERPLEXITY:**\n\n``````\n\n"
+            MESSAGES['perplexity_start']['text'],
+            parse_mode='Markdown'
+        )
+        
+        bot.send_message(
+            chat_id,
+            f"**СКОПИРУЙТЕ И ВСТАВЬТЕ В PERPLEXITY:**\n\n```\n{prompt}\n```\n\n"
             "Когда будет готово — пришлите скриншот или текст результата сюда! ✅",
             parse_mode='Markdown'
         )
@@ -378,6 +347,22 @@ def handle_user_response(message):
             reply_markup=markup
         )
     
+    elif stage and stage.startswith('level_'):
+        users_db[chat_id]['stage'] = 'ready_for_contacts'
+        
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton('✅ Готово, давай дальше!', callback_data='request_contacts'))
+        
+        bot.send_message(
+            chat_id,
+            "🔥 **МАСТЕРСКИЙ АНАЛИЗ!** Видно, что ты понимаешь рынок.\n\n"
+            "Теперь получи доступ к ЗАКРЫТОМУ вебинару для предпринимателей и владельцев бизнеса.\n\n"
+            "50 мест на ВИП-треке с разбором твоего конкретного бизнеса.\n\n"
+            "Оставь свои контакты!",
+            parse_mode='Markdown',
+            reply_markup=markup
+        )
+    
     elif stage == 'waiting_for_phone':
         if is_valid_phone(message.text):
             users_db[chat_id]['phone'] = message.text
@@ -398,7 +383,7 @@ def handle_user_response(message):
             specialty = users_db[chat_id].get('specialty', None)
             level = users_db[chat_id].get('current_level', None)
             
-            send_lead_email(name, phone, email, path, specialty, level)
+            send_lead_to_admin(name, phone, email, path, specialty, level)
             
             bot.send_message(
                 chat_id,
@@ -424,4 +409,16 @@ def handle_request_contacts(call):
 @bot.message_handler(commands=['help'])
 def handle_help(message):
     help_text = (
-        "🤖 
+        "🤖 **КОМАНДЫ:**\n\n"
+        "/start — Начать с начала\n"
+        "/help — Эта справка\n\n"
+        "Есть вопросы? Напиши нам в поддержку."
+    )
+    bot.send_message(message.chat.id, help_text, parse_mode='Markdown')
+
+if __name__ == '__main__':
+    print("🤖 Бот запущен...")
+    try:
+        bot.infinity_polling(skip_pending=True)
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
