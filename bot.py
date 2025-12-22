@@ -203,7 +203,6 @@ MESSAGES = {
 # ===== ВАЛИДАЦИЯ =====
 
 def is_valid_phone(phone):
-    # Простая валидация: 11 цифр для России
     digits = re.sub(r'\D', '', phone)
     return len(digits) == 11 or len(digits) == 10
 
@@ -235,7 +234,6 @@ Email: {email}
         msg['Subject'] = subject
         msg.attach(MIMEText(body, 'plain'))
         
-        # Если есть SMTP пароль, отправляем
         if SMTP_PASSWORD:
             with smtplib.SMTP('smtp.gmail.com', 587) as server:
                 server.starttls()
@@ -243,7 +241,6 @@ Email: {email}
                 server.send_message(msg)
             return True
         else:
-            # Без SMTP просто логируем
             print(f"[EMAIL] {subject}\n{body}")
             return True
     except Exception as e:
@@ -323,7 +320,7 @@ def handle_freelancer_specialty(call):
     
     bot.send_message(chat_id, text, parse_mode='Markdown', reply_markup=markup)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('level_') and not call.data.startswith('level_1_boss') and not call.data.startswith('level_2_boss') and not call.data.startswith('level_3_boss'))
+@bot.callback_query_handler(func=lambda call: call.data.startswith('level_1_') or call.data.startswith('level_2_') or call.data.startswith('level_3_'))
 def handle_level_selection(call):
     chat_id = call.message.chat.id
     parts = call.data.split('_')
@@ -360,42 +357,6 @@ def handle_level_selection(call):
             parse_mode='Markdown'
         )
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('level_') and (call.data.startswith('level_1_boss') or call.data.startswith('level_2_boss') or call.data.startswith('level_3_boss')))
-def handle_boss_level_selection(call):
-    chat_id = call.message.chat.id
-    parts = call.data.split('_')
-    level = parts[1]
-    
-    users_db[chat_id]['current_level'] = level
-    users_db[chat_id]['stage'] = f'level_{level}'
-    
-    # 1️⃣ СНАЧАЛА ОТПРАВЛЯЕМ САМО ЗАДАНИЕ
-    prompt_key = f'level{level}_boss'
-    if prompt_key in PROMPTS:
-        prompt = PROMPTS[prompt_key]
-        bot.send_message(
-            chat_id,
-            f"🎯 **ВАШЕ ИССЛЕДОВАНИЕ УРОВНЯ {level}:**\n\n{prompt}",
-            parse_mode='Markdown'
-        )
-    
-    # 2️⃣ ПОТОМ ИНСТРУКЦИЯ ПО PERPLEXITY
-    bot.send_message(
-        chat_id,
-        MESSAGES['perplexity_start']['text'],
-        parse_mode='Markdown'
-    )
-    
-    # 3️⃣ ПОТОМ ПРОМТ В КОДЕ ДЛЯ КОПИРОВАНИЯ
-    if prompt_key in PROMPTS:
-        prompt = PROMPTS[prompt_key]
-        bot.send_message(
-            chat_id,
-            f"**СКОПИРУЙТЕ И ВСТАВЬТЕ В PERPLEXITY:**\n\n``````\n\n"
-            "Когда будет готово — пришлите скриншот или текст результата сюда! 📸",
-            parse_mode='Markdown'
-        )
-
 @bot.message_handler(content_types=['text', 'photo', 'document'])
 def handle_user_response(message):
     chat_id = message.chat.id
@@ -406,9 +367,7 @@ def handle_user_response(message):
     
     stage = users_db[chat_id].get('stage')
     
-    # Если пользователь на этапе выполнения задания
     if stage and stage.startswith('level_'):
-        # Переходим к финальному экрану успеха
         users_db[chat_id]['stage'] = 'ready_for_contacts'
         
         markup = types.InlineKeyboardMarkup()
@@ -438,7 +397,6 @@ def handle_user_response(message):
             users_db[chat_id]['email'] = message.text
             users_db[chat_id]['stage'] = 'completed'
             
-            # Отправляем лид менеджеру
             name = users_db[chat_id].get('name', 'Unknown')
             phone = users_db[chat_id].get('phone', 'N/A')
             email = message.text
@@ -472,16 +430,4 @@ def handle_request_contacts(call):
 @bot.message_handler(commands=['help'])
 def handle_help(message):
     help_text = (
-        "🤖 **КОМАНДЫ:**\n\n"
-        "/start — Начать с начала\n"
-        "/help — Эта справка\n\n"
-        "Есть вопросы? Напиши нам в поддержку."
-    )
-    bot.send_message(message.chat.id, help_text, parse_mode='Markdown')
-
-if __name__ == '__main__':
-    print("🤖 Бот запущен...")
-    try:
-        bot.infinity_polling(skip_pending=True)
-    except Exception as e:
-        print(f"❌ Ошибка: {e}")
+        "🤖 
