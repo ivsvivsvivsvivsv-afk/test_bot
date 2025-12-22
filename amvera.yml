@@ -6,12 +6,6 @@ build:
   environment: python
   version: "3.10"
   requirementsPath: requirements.txt
-  useCache: true
 
 run:
   scriptName: bot.py
-  command: python bot.py
-
-env:
-  - TELEGRAM_BOT_TOKEN
-  - ADMIN_IDS
