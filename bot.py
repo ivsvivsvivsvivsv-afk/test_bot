@@ -211,40 +211,34 @@ def is_valid_email(email):
     return re.match(pattern, email)
 
 def send_lead_email(name, phone, email, path, specialty=None, level=None):
-    """Отправляет лид менеджеру по продажам"""
+    """Отправляет лид в Telegram"""
     try:
-        subject = f"🔥 НОВЫЙ ЛИД: {path} ({specialty or 'N/A'})"
-        body = f"""
-Новый лид из бота!
+        # Твой Telegram ID (админа бота)
+        ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
+        
+        if ADMIN_ID == 0:
+            print("[WARNING] ADMIN_ID не установлен в переменных окружения!")
+            return False
+        
+        message = f"""
+🔥 **НОВЫЙ ЛИД**
 
-Имя: {name}
-Телефон: {phone}
-Email: {email}
-Тип: {path}
-Специальность: {specialty or '-'}
-Уровень: {level or '-'}
-Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+👤 Имя: {name}
+📱 Телефон: {phone}
+📧 Email: {email}
+🎯 Тип: {path}
+💼 Специальность: {specialty or '-'}
+📚 Уровень: {level or '-'}
+⏰ Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
-Задача: Перезвонить в течение 1 часа и отправить ссылку на вебинар.
+💬 Задача: Перезвонить в течение 1 часа и отправить ссылку на вебинар.
         """
         
-        msg = MIMEMultipart()
-        msg['From'] = 'noreply@neurounit.bot'
-        msg['To'] = MANAGER_EMAIL
-        msg['Subject'] = subject
-        msg.attach(MIMEText(body, 'plain'))
-        
-        if SMTP_PASSWORD:
-            with smtplib.SMTP('smtp.gmail.com', 587) as server:
-                server.starttls()
-                server.login('noreply@neurounit.bot', SMTP_PASSWORD)
-                server.send_message(msg)
-            return True
-        else:
-            print(f"[EMAIL] {subject}\n{body}")
-            return True
+        bot.send_message(ADMIN_ID, message, parse_mode='Markdown')
+        print(f"[LEAD] Отправлено админу: {name} ({email})")
+        return True
     except Exception as e:
-        print(f"Email error: {e}")
+        print(f"Lead send error: {e}")
         return False
 
 # ===== ОБРАБОТЧИКИ =====
