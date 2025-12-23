@@ -184,7 +184,6 @@ if __name__ == '__main__':
         bot.set_webhook(url=webhook_path)
         print(f"✅ Webhook установлен: {webhook_path}")
     except Exception as e:
-        print(f"⚠️  Ошибка webhook: {e}")
-        
-    app.run(host='0.0.0.0', port=8080)
-
+        print(f"⚠️  Ошибка webhook: {e}")   
+   port = int(os.getenv('PORT', 8080))  # ← Добавь эту строку
+   app.run(host='0.0.0.0', port=port)   # ← Измени на port
