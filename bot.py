@@ -185,5 +185,4 @@ if __name__ == '__main__':
         print(f"✅ Webhook установлен: {webhook_path}")
     except Exception as e:
         print(f"⚠️  Ошибка webhook: {e}")   
-   port = int(os.getenv('PORT', 8080))  # ← Добавь эту строку
-   app.run(host='0.0.0.0', port=port)   # ← Измени на port
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT') or 8080), debug=False)
