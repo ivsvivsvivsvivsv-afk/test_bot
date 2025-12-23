@@ -8,7 +8,7 @@ from datetime import datetime
 # ===== CONFIG =====
 API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 ADMIN_IDS = os.getenv('ADMIN_IDS', '0')
-WEBHOOK_URL = os.getenv('WEBHOOK_URL')
+WEBHOOK_URL = os.getenv('WEBHOOK_URL', 'https://rs-zhurkinigor.amvera.io')
 
 if not API_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN not set")
