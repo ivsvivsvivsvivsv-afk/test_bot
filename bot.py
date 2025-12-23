@@ -185,4 +185,6 @@ if __name__ == '__main__':
         print(f"✅ Webhook установлен: {webhook_path}")
     except Exception as e:
         print(f"⚠️  Ошибка webhook: {e}")   
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT') or 8080), debug=False)
+         
+    # Используем порт 80, как указано в amvera.yml
+    app.run(host='0.0.0.0', port=80, debug=False)
