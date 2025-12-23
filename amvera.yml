@@ -1,11 +1,13 @@
+---
 meta:
-  name: ksон
-  description: "Telegram bot for Neuro-Unit course"
+  environment: python
+  toolchain:
+    name: pip
+    version: 3.10
 
 build:
-  environment: python
-  version: "3.10"
   requirementsPath: requirements.txt
 
 run:
-  scriptName: bot.py
+  command: python bot.py
+  containerPort: 80
