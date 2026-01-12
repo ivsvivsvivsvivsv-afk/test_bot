@@ -12,3 +12,4 @@ run:
   command: gunicorn -w 1 -b 0.0.0.0:${PORT:-80} bot:app
   containerPort: 80
   persistenceMount: /data
+
