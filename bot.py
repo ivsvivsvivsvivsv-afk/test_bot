@@ -8,17 +8,17 @@ from telebot import types
 from flask import Flask, request
 
 # ================== ENV ==================
-# Required:
-# TELEGRAM_BOT_TOKEN
-# WEBHOOK_URL = https://<your-app>.amvera.io
-# WEBHOOK_SECRET = random string
+# Required (set in Amvera variables/secrets):
+# - TELEGRAM_BOT_TOKEN
+# - WEBHOOK_URL = https://rs-zhurkinigor.amvera.io
+# - WEBHOOK_SECRET = random long string
 # Optional:
-# ADMIN_IDS = "123,456"
-# DATA_DIR = /data
-# KSON_*_VIDEO_NOTE_FILE_ID
+# - ADMIN_IDS = "123,456"
+# - DATA_DIR = /data
+# - KSON_*_VIDEO_NOTE_FILE_ID
 
 API_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://rs-zhurkinigor.amvera.io")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 ADMIN_IDS = os.getenv("ADMIN_IDS", "0")
 
@@ -32,28 +32,31 @@ KSON_HACKATHON_VIDEO_NOTE_FILE_ID = os.getenv("KSON_HACKATHON_VIDEO_NOTE_FILE_ID
 if not API_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN not set")
 if not WEBHOOK_URL:
-    raise ValueError("WEBHOOK_URL not set (must be public https url, e.g. https://xxx.amvera.io)")
+    raise ValueError("WEBHOOK_URL not set")
 if not WEBHOOK_SECRET:
-    raise ValueError("WEBHOOK_SECRET not set (must be a random secret string)")
+    raise ValueError("WEBHOOK_SECRET not set")
 
 bot = telebot.TeleBot(API_TOKEN)
 app = Flask(__name__)
 users_db = {}
 
-# ================== 15 IMAGES ==================
+# ================== COMICS (15 images) ==================
 IMAGES = {
     "command_center": "",
     "video_generator": "",
     "avatar_choice": "",
     "professions_overview": "",
+
     "prof_management": "",
     "prof_analytics": "",
     "prof_copywriting": "",
     "prof_design": "",
     "prof_marketing": "",
+
     "levels_3": "",
     "prompt_artifact": "",
     "contacts": "",
+
     "hackathon": "",
     "hackathon_qualify": "",
     "hackathon_register": "",
@@ -64,14 +67,17 @@ CAPTIONS = {
     "video_generator": "🎬 Портал генератора видео.\nЗапускаем конвейер.",
     "avatar_choice": "🦸 Выбор аватара.\nФрилансер или Босс?",
     "professions_overview": "🎒 Выбор профессии.\nОпредели класс героя.",
+
     "prof_management": "🧠 Класс: Менеджмент.\nВыбери уровень силы.",
     "prof_analytics": "📈 Класс: Аналитика.\nВыбери уровень силы.",
     "prof_copywriting": "✍️ Класс: Копирайтинг.\nВыбери уровень силы.",
     "prof_design": "🎨 Класс: Дизайн.\nВыбери уровень силы.",
     "prof_marketing": "📊 Класс: Маркетинг.\nВыбери уровень силы.",
+
     "levels_3": "⚡ 3 уровня: Новичок / Спец / Гений.",
     "prompt_artifact": "🎯 Артефакт‑промпт получен.\nИдём в Perplexity.",
     "contacts": "📱 Закрепляем доступ.\nТелефон и email.",
+
     "hackathon": "🏆 Арена открыта.\nИспытай силы.",
     "hackathon_qualify": "🏆 Выбор лиги.\nСпец / Гений / ИИ‑проект.",
     "hackathon_register": "📝 Регистрация на арену.\nТелефон и email.",
@@ -132,7 +138,7 @@ PROMPTS = {
 
     "level1_analytics": "Я аналитик. Дай мне промт-шаблон для создания дашборда в Excel/Google Sheets, который показывает ключевые метрики онлайн-курса: 1) Конверсия, 2) Retention, 3) Средний чек, 4) LTV. Включи формулы и как их понимать.",
     "level2_analytics": "Я аналитик данных. Напиши аналитический отчет: Какие метрики важны для трекинга успеха ИИ-фрилансера? Включи: 1) Метрики заработка, 2) Метрики скорости выполнения задач, 3) Метрики качества, 4) Как их сравнивать с фрилансерами без ИИ.",
-    "level3_analytics": "Я senior аналитик. Создай систему аналитики, которая показывает ROI от внедрения ИИ в бизнес. Дай: 1) Какие данные собирать, 2) Как их обрабатывать, 3) Визуалализация для топ-менеджмента, 4) Предиктивные модели, 5) Как принимать решения на основе данных.",
+    "level3_analytics": "Я senior аналитик. Создай систему аналитики, которая показывает ROI от внедрения ИИ в бизнес. Дай: 1) Какие данные собирать, 2) Как их обрабатывать, 3) Визуализация для топ-менеджмента, 4) Предиктивные модели, 5) Как принимать решения на основе данных.",
 
     "level1_management": "Я менеджер/руководитель. Помоги внедрить ИИ в ежедневную работу. Составь список из 10 задач, которые можно делегировать ИИ уже сегодня (планирование, отчеты, письма, контроль задач, подготовка встреч). Для каждой задачи: пример промпта и ожидаемый результат.",
     "level2_management": "Я менеджер проектов/операционный менеджер. Составь систему управления задачами с ИИ: как вести бэклог, приоритизацию, статусы, риски, коммуникации и отчеты, чтобы экономить 5–10 часов в неделю. Дай шаблоны промптов и регламент на 7 дней внедрения.",
@@ -159,13 +165,13 @@ AI_CHECKLIST_TEXT = (
     "5) Автоматизация: если задача повторяется 2+ раза в неделю — пора делать пайплайн.\n"
 )
 
-# ================== VALIDATION ==================
-def is_valid_phone(phone):
-    digits = re.sub(r"\D", "", phone)
-    return len(digits) in [10, 11]
+# ================== VALIDATION / LEADS ==================
+def is_valid_phone(phone: str) -> bool:
+    digits = re.sub(r"\D", "", phone or "")
+    return len(digits) in (10, 11)
 
-def is_valid_email(email):
-    return re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", email)
+def is_valid_email(email: str) -> bool:
+    return bool(re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", email or ""))
 
 def send_lead_to_admin(name, phone, email, path, specialty=None, level=None, extra=None):
     try:
@@ -205,41 +211,41 @@ def safe_send_video_note(chat_id, file_id, fallback_text):
             pass
     bot.send_message(chat_id, fallback_text, parse_mode="Markdown")
 
-# ================== ADMIN: WEBHOOK SETUP ==================
-# Установка webhook делается отдельным запросом (один раз после деплоя),
-# чтобы не дергать Telegram при каждом рестарте контейнера. [web:305]
-@app.post("/setup-webhook")
-def setup_webhook():
-    header_secret = request.headers.get("X-Setup-Secret", "")
-    if header_secret != WEBHOOK_SECRET:
-        return "forbidden", 403
-    url = f"{WEBHOOK_URL}{webhook_path()}"
-    bot.set_webhook(url=url)
-    return "ok", 200
-
-# ================== HEALTHCHECK ==================
+# ================== ADMIN HTTP ==================
 @app.get("/ping")
 def ping():
     return "ok", 200
 
-# ================== WEBHOOK RECEIVER ==================
+@app.post("/setup-webhook")
+def setup_webhook():
+    # Защита: только если заголовок совпадает с WEBHOOK_SECRET
+    header_secret = request.headers.get("X-Setup-Secret", "")
+    if header_secret != WEBHOOK_SECRET:
+        return "forbidden", 403
+
+    url = f"{WEBHOOK_URL}{webhook_path()}"
+    bot.set_webhook(url=url)
+    return "ok", 200
+
 @app.post("/webhook/<secret>")
 def webhook(secret):
     if secret != WEBHOOK_SECRET:
         return "forbidden", 403
+
     json_data = request.get_json(force=True, silent=True) or {}
     update = telebot.types.Update.de_json(json_data)
     bot.process_new_updates([update])
     return "ok", 200
 
-# ================== IMAGE BINDING COMMANDS ==================
+# ================== IMAGE BINDING ==================
 @bot.message_handler(commands=["setimg"])
 def setimg_cmd(msg):
     chat_id = msg.chat.id
-    parts = msg.text.split()
+    parts = (msg.text or "").split()
     if len(parts) < 2:
         bot.send_message(chat_id, "Команда: /setimg <key>\nНапример: /setimg command_center")
         return
+
     key = parts[1].strip()
     if key not in IMAGES:
         bot.send_message(chat_id, "Неизвестный key.\nНапиши /imgkeys чтобы увидеть список.")
@@ -282,7 +288,7 @@ def receive_image(msg):
     users_db[chat_id].pop("waiting_image_key", None)
     bot.send_message(chat_id, f"✅ Картинка сохранена: {key}")
 
-# ================== BOT FLOWS ==================
+# ================== USER FLOWS ==================
 @bot.message_handler(commands=["start"])
 def start(msg):
     chat_id = msg.chat.id
@@ -394,6 +400,7 @@ def path_select(call):
         markup.add(types.InlineKeyboardButton("📊 Маркетинг", callback_data="marketing"))
 
         bot.send_message(chat_id, "🎒 **ПРОФЕССИИ**\n\nВыбери направление:", parse_mode="Markdown", reply_markup=markup)
+
     else:
         send_comic(chat_id, "levels_3")
 
@@ -474,6 +481,7 @@ def done(call):
 @bot.message_handler(content_types=["text"])
 def handle_text(msg):
     chat_id = msg.chat.id
+
     if chat_id not in users_db:
         bot.send_message(chat_id, "Напиши /start")
         return
@@ -492,11 +500,24 @@ def handle_text(msg):
     if stage == "hackathon_registration_wait_email":
         if is_valid_email(msg.text):
             users_db[chat_id]["email"] = msg.text
+
             name = users_db[chat_id].get("name", "Unknown")
             phone = users_db[chat_id].get("phone", "")
             tier = users_db[chat_id].get("hackathon_tier", "-")
-            send_lead_to_admin(name, phone, msg.text, "hackathon", specialty="hackathon", level="-", extra={"🏆 Лига": tier})
-            bot.send_message(chat_id, "✅ **Ты зарегистрирован на онлайн‑хакатон!**\nСкоро придёт пакет участника.\n\n" + AI_CHECKLIST_TEXT, parse_mode="Markdown")
+
+            send_lead_to_admin(
+                name, phone, msg.text, "hackathon",
+                specialty="hackathon",
+                level="-",
+                extra={"🏆 Лига": tier},
+            )
+
+            bot.send_message(
+                chat_id,
+                "✅ **Ты зарегистрирован на онлайн‑хакатон!**\n"
+                "Скоро придёт пакет участника.\n\n" + AI_CHECKLIST_TEXT,
+                parse_mode="Markdown",
+            )
             users_db[chat_id]["stage"] = "start"
         else:
             bot.send_message(chat_id, "❌ Некорректный email. Введи снова:")
@@ -514,13 +535,21 @@ def handle_text(msg):
     if stage == "waiting_email":
         if is_valid_email(msg.text):
             users_db[chat_id]["email"] = msg.text
+
             name = users_db[chat_id].get("name", "Unknown")
             phone = users_db[chat_id].get("phone", "")
             path = users_db[chat_id].get("path", "")
             specialty = users_db[chat_id].get("specialty")
             level = users_db[chat_id].get("current_level")
+
             send_lead_to_admin(name, phone, msg.text, path, specialty, level)
-            bot.send_message(chat_id, "✅ **Контакты получены!**\nМенеджер свяжется и пришлёт материалы.\n\n" + AI_CHECKLIST_TEXT, parse_mode="Markdown")
+
+            bot.send_message(
+                chat_id,
+                "✅ **Контакты получены!**\n"
+                "Менеджер свяжется и пришлёт материалы.\n\n" + AI_CHECKLIST_TEXT,
+                parse_mode="Markdown",
+            )
             users_db[chat_id]["stage"] = "start"
         else:
             bot.send_message(chat_id, "❌ Некорректный email. Введи снова:")
@@ -528,5 +557,5 @@ def handle_text(msg):
 
     bot.send_message(chat_id, "Чтобы начать — напиши /start")
 
-# ================== LOAD PERSISTED DATA ==================
+# ================== LOAD PERSISTED IMAGES ==================
 load_images()
