@@ -1,13 +1,6 @@
----
-meta:
-  environment: python
-  toolchain:
-    name: pip
-    version: 3.10
-
 build:
-  requirementsPath: requirements.txt
+  dockerfile: Dockerfile
 
 run:
-  command: python bot.py
   containerPort: 80
+  persistenceMount: /data
