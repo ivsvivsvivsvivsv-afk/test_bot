@@ -36,7 +36,6 @@ users_db = {}
 
 # ================== TEXTS ==================
 def load_texts():
-    # If texts.json is missing/broken — bot still runs with fallback.
     fallback = {
         "buttons": {},
         "messages": {},
@@ -83,6 +82,35 @@ def pick_after_done():
     if isinstance(arr, list) and arr:
         return random.choice([x for x in arr if isinstance(x, str)] or [""])
     return ""
+
+# ================== HELPERS: callbacks/UX ==================
+def ack(call, remove_keyboard=False):
+    # Prevent "loading" spinner and repeated taps.
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+
+    if remove_keyboard:
+        try:
+            bot.edit_message_reply_markup(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                reply_markup=None
+            )
+        except Exception:
+            pass
+
+def safe_send_video_note(chat_id, file_id, fallback_text):
+    if file_id:
+        try:
+            bot.send_video_note(chat_id, file_id)
+            return True
+        except Exception:
+            pass
+    if fallback_text:
+        bot.send_message(chat_id, fallback_text, parse_mode="Markdown")
+    return False
 
 # ================== COMICS (15 images) ==================
 IMAGES = {
@@ -167,7 +195,6 @@ PROMPTS = {
     "level2_management": "Я менеджер проектов/операционный менеджер. Составь систему управления задачами с ИИ: как вести бэклог, приоритизацию, статусы, риски, коммуникации и отчеты, чтобы экономить 5–10 часов в неделю. Дай шаблоны промптов и регламент на 7 дней внедрения.",
     "level3_management": "Я руководитель. Создай архитектуру 'ИИ-операционного ассистента': процессы, роли, входные данные, шаблоны, контроль качества и метрики эффективности. Цель: ускорить принятие решений и снизить ручной менеджмент в 3–5 раз. Дай пошаговый roadmap внедрения.",
 
-    # NEW
     "level1_video_creator": "Я видео‑креатор. Придумай 10 вирусных идей коротких видео (Reels/TikTok) под мою нишу [укажи нишу]. Для каждой: хук 2 секунды, сценарий 15–30 сек, CTA, и какая эмоция должна быть в кадре.",
     "level2_video_creator": "Я видео‑креатор. Составь контент‑систему на 30 дней: рубрики, частота, форматы, сценарные шаблоны, чек‑лист монтажа и публикации. Укажи, как использовать ИИ (сценарий, субтитры, монтаж, обложки).",
     "level3_video_creator": "Я видео‑креатор/продюсер. Создай стратегию масштабирования: команда, пайплайн, инструменты ИИ, метрики, бюджет, и план на 12 недель для роста. Дай риск‑менеджмент и шаблоны промптов."
@@ -209,15 +236,6 @@ def send_lead_to_admin(name, phone, email, path, specialty=None, level=None, ext
         return True
     except Exception:
         return False
-
-def safe_send_video_note(chat_id, file_id, fallback_text):
-    if file_id:
-        try:
-            bot.send_video_note(chat_id, file_id)
-            return
-        except Exception:
-            pass
-    bot.send_message(chat_id, fallback_text, parse_mode="Markdown")
 
 # ================== ADMIN HTTP ==================
 @app.get("/ping")
@@ -301,10 +319,11 @@ def start(msg):
     chat_id = msg.chat.id
     users_db[chat_id] = {"stage": "start", "name": msg.from_user.first_name or "User"}
 
+    # Screen: command center (comic = main смысл). No duplicate text blocks.
     send_comic(chat_id, "command_center")
 
+    # Optional videonote; fallback is SHORT and doesn't repeat "choose portal"
     safe_send_video_note(chat_id, KSON_START_VIDEO_NOTE_FILE_ID, t("kson.start_fallback", ""))
-    bot.send_message(chat_id, t("messages.start_system_activated", ""), parse_mode="Markdown")
 
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(types.InlineKeyboardButton(btn("buttons.portal_video", "🎬 Генератор видео"), callback_data="go_video_bot"))
@@ -314,14 +333,17 @@ def start(msg):
 
 @bot.callback_query_handler(func=lambda c: c.data == "go_video_bot")
 def go_video_bot(call):
+    ack(call, remove_keyboard=True)
     chat_id = call.message.chat.id
     users_db.setdefault(chat_id, {"stage": "start", "name": call.from_user.first_name or "User"})
     users_db[chat_id]["path"] = "video_bot"
+
     send_comic(chat_id, "video_generator")
     bot.send_message(chat_id, t("messages.video_bot_opened", ""))
 
 @bot.callback_query_handler(func=lambda c: c.data == "go_learning")
 def go_learning(call):
+    ack(call, remove_keyboard=True)
     chat_id = call.message.chat.id
     users_db.setdefault(chat_id, {"stage": "start", "name": call.from_user.first_name or "User"})
     users_db[chat_id]["stage"] = "start"
@@ -337,14 +359,15 @@ def go_learning(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == "go_hackathon")
 def go_hackathon(call):
+    ack(call, remove_keyboard=True)
     chat_id = call.message.chat.id
     users_db.setdefault(chat_id, {"stage": "start", "name": call.from_user.first_name or "User"})
     users_db[chat_id]["path"] = "hackathon"
     users_db[chat_id]["stage"] = "hackathon_qualify"
 
     send_comic(chat_id, "hackathon")
-
     bot.send_message(chat_id, t("messages.hack_arena_open", ""), parse_mode="Markdown")
+
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(types.InlineKeyboardButton(btn("buttons.hack_tier_spec", "⚡ Спец"), callback_data="hack_tier_spec"))
     markup.add(types.InlineKeyboardButton(btn("buttons.hack_tier_genius", "💥 Гений"), callback_data="hack_tier_genius"))
@@ -353,19 +376,23 @@ def go_hackathon(call):
 
 @bot.callback_query_handler(func=lambda c: c.data in ["hack_tier_spec", "hack_tier_genius", "hack_tier_project"])
 def hackathon_qualify(call):
+    ack(call, remove_keyboard=True)
     chat_id = call.message.chat.id
     users_db.setdefault(chat_id, {"stage": "start", "name": call.from_user.first_name or "User"})
     users_db[chat_id]["hackathon_tier"] = call.data.replace("hack_tier_", "")
     users_db[chat_id]["stage"] = "hackathon_registration_wait_phone"
 
-    send_comic(chat_id, "hackathon_qualify")
+    # One screen = one comic about registration.
+    send_comic(chat_id, "hackathon_register")
+
+    # Optional videonote; short fallback only
     safe_send_video_note(chat_id, KSON_HACKATHON_VIDEO_NOTE_FILE_ID, t("kson.hackathon_fallback", ""))
 
-    send_comic(chat_id, "hackathon_register")
     bot.send_message(chat_id, t("messages.ask_phone", "📱 Телефон:"))
 
 @bot.callback_query_handler(func=lambda c: c.data in ["freelancer", "boss", "artist"])
 def path_select(call):
+    ack(call, remove_keyboard=True)
     chat_id = call.message.chat.id
     users_db.setdefault(chat_id, {"stage": "start", "name": call.from_user.first_name or "User"})
     users_db[chat_id]["path"] = call.data
@@ -393,6 +420,7 @@ def path_select(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == "other_specialty")
 def other_specialty(call):
+    ack(call, remove_keyboard=True)
     chat_id = call.message.chat.id
     users_db.setdefault(chat_id, {"stage": "start", "name": call.from_user.first_name or "User"})
     users_db[chat_id]["stage"] = "waiting_specialty_text"
@@ -400,6 +428,7 @@ def other_specialty(call):
 
 @bot.callback_query_handler(func=lambda c: c.data in ["copywriting", "design", "marketing", "analytics", "management", "video_creator"])
 def specialty_select(call):
+    ack(call, remove_keyboard=True)
     chat_id = call.message.chat.id
     users_db.setdefault(chat_id, {"stage": "start", "name": call.from_user.first_name or "User"})
     users_db[chat_id]["specialty"] = call.data
@@ -412,8 +441,8 @@ def specialty_select(call):
         "marketing": "prof_marketing",
         "video_creator": "professions_overview"
     }
+    # Keep profession comic (class) AND then levels? -> remove duplicate meaning by not sending levels comic here.
     send_comic(chat_id, prof_key_map.get(call.data, "professions_overview"))
-    send_comic(chat_id, "levels_3")
 
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(types.InlineKeyboardButton(btn("buttons.level_1", "📚 Уровень 1"), callback_data=f"level_1_{call.data}"))
@@ -423,6 +452,7 @@ def specialty_select(call):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("level_"))
 def level_select(call):
+    ack(call, remove_keyboard=True)
     chat_id = call.message.chat.id
     users_db.setdefault(chat_id, {"stage": "start", "name": call.from_user.first_name or "User"})
 
@@ -448,12 +478,18 @@ def level_select(call):
 
     bot.send_message(chat_id, t("messages.prompt_task_title", "", level=level, prompt=prompt), parse_mode="Markdown")
 
+    # Optional: send videonote; fallback is short
     safe_send_video_note(chat_id, KSON_SUCCESS_VIDEO_NOTE_FILE_ID, t("kson.success_fallback", ""))
-    bot.send_message(chat_id, t("perplexity.help", ""), parse_mode="Markdown")
+
+    # Combine instructions + done prompt into one message (so fewer blocks)
+    text = t("perplexity.help", "")
+    done_line = t("messages.perplexity_done_prompt", "")
+    if done_line:
+        text = (text + "\n\n" + done_line).strip()
 
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton(btn("buttons.done", "✅ Выполнил!"), callback_data="done"))
-    bot.send_message(chat_id, t("messages.perplexity_done_prompt", ""), reply_markup=markup)
+    bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=markup)
 
     if level == "3":
         bot.send_message(chat_id, t("messages.hackathon_invite_lvl3", ""), parse_mode="Markdown")
@@ -463,6 +499,7 @@ def level_select(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == "done")
 def done(call):
+    ack(call, remove_keyboard=True)
     chat_id = call.message.chat.id
     users_db.setdefault(chat_id, {"stage": "start", "name": call.from_user.first_name or "User"})
     users_db[chat_id]["stage"] = "waiting_phone"
@@ -490,8 +527,11 @@ def handle_text(msg):
         users_db[chat_id]["specialty_text"] = (msg.text or "").strip()
         users_db[chat_id]["stage"] = "waiting_result"
 
+        # Show levels selection for "other": no duplicate levels comic needed if you already want 1 screen.
         send_comic(chat_id, "levels_3")
+
         markup = types.InlineKeyboardMarkup(row_width=1)
+        # Keep same behavior as your original code: it routes to analytics prompts.
         markup.add(types.InlineKeyboardButton(btn("buttons.level_1", "📚 Уровень 1"), callback_data="level_1_analytics"))
         markup.add(types.InlineKeyboardButton(btn("buttons.level_2", "📘 Уровень 2"), callback_data="level_2_analytics"))
         markup.add(types.InlineKeyboardButton(btn("buttons.level_3", "📕 Уровень 3"), callback_data="level_3_analytics"))
@@ -525,7 +565,6 @@ def handle_text(msg):
             checklist = t("checklist.ai_checklist_text", "")
             bot.send_message(chat_id, t("messages.final_hack_registered", "", checklist=checklist), parse_mode="Markdown")
 
-            # workshop (optional)
             ann = t("messages.workshop_announce", "")
             if ann:
                 mk = types.InlineKeyboardMarkup()
@@ -565,7 +604,6 @@ def handle_text(msg):
             checklist = t("checklist.ai_checklist_text", "")
             bot.send_message(chat_id, t("messages.final_contacts_received", "", checklist=checklist), parse_mode="Markdown")
 
-            # workshop (optional)
             ann = t("messages.workshop_announce", "")
             if ann:
                 mk = types.InlineKeyboardMarkup()
