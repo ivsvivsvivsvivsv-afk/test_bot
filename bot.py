@@ -4,6 +4,7 @@ import json
 import random
 from datetime import datetime
 
+import requests
 import telebot
 from telebot import types
 from flask import Flask, request
@@ -16,12 +17,16 @@ ADMIN_IDS = os.getenv("ADMIN_IDS", "0")
 
 DATA_DIR = os.getenv("DATA_DIR", "/data")
 IMAGES_PATH = os.path.join(DATA_DIR, "images.json")
-
 TEXTS_PATH = os.getenv("TEXTS_PATH", "texts.json")
 
 KSON_START_VIDEO_NOTE_FILE_ID = os.getenv("KSON_START_VIDEO_NOTE_FILE_ID", "")
 KSON_SUCCESS_VIDEO_NOTE_FILE_ID = os.getenv("KSON_SUCCESS_VIDEO_NOTE_FILE_ID", "")
 KSON_HACKATHON_VIDEO_NOTE_FILE_ID = os.getenv("KSON_HACKATHON_VIDEO_NOTE_FILE_ID", "")
+
+# GA4 (Measurement Protocol)
+GA4_MEASUREMENT_ID = os.getenv("GA4_MEASUREMENT_ID", "")
+GA4_API_SECRET = os.getenv("GA4_API_SECRET", "")
+GA4_DEBUG = os.getenv("GA4_DEBUG", "0").strip() in ("1", "true", "True", "yes", "YES")
 
 if not API_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN not set")
@@ -33,6 +38,32 @@ if not WEBHOOK_SECRET:
 bot = telebot.TeleBot(API_TOKEN)
 app = Flask(__name__)
 users_db = {}
+
+# ================== GA4 TRACKING ==================
+def ga4_track(user_id: int, event_name: str, params: dict | None = None):
+    if not GA4_MEASUREMENT_ID or not GA4_API_SECRET:
+        return
+
+    params = params or {}
+    if GA4_DEBUG:
+        params["debug_mode"] = 1
+
+    url = (
+        "https://www.google-analytics.com/mp/collect"
+        f"?measurement_id={GA4_MEASUREMENT_ID}&api_secret={GA4_API_SECRET}"
+    )
+
+    payload = {
+        "client_id": f"tg_{user_id}",
+        "events": [
+            {"name": event_name, "params": params}
+        ]
+    }
+
+    try:
+        requests.post(url, json=payload, timeout=2)
+    except Exception:
+        pass
 
 # ================== TEXTS ==================
 def load_texts():
@@ -85,12 +116,10 @@ def pick_after_done():
 
 # ================== HELPERS: callbacks/UX ==================
 def ack(call, remove_keyboard=False):
-    # Prevent "loading" spinner and repeated taps.
     try:
         bot.answer_callback_query(call.id)
     except Exception:
         pass
-
     if remove_keyboard:
         try:
             bot.edit_message_reply_markup(
@@ -319,10 +348,9 @@ def start(msg):
     chat_id = msg.chat.id
     users_db[chat_id] = {"stage": "start", "name": msg.from_user.first_name or "User"}
 
-    # Screen: command center (comic = main смысл). No duplicate text blocks.
-    send_comic(chat_id, "command_center")
+    ga4_track(msg.from_user.id, "bot_start")
 
-    # Optional videonote; fallback is SHORT and doesn't repeat "choose portal"
+    send_comic(chat_id, "command_center")
     safe_send_video_note(chat_id, KSON_START_VIDEO_NOTE_FILE_ID, t("kson.start_fallback", ""))
 
     markup = types.InlineKeyboardMarkup(row_width=1)
@@ -338,6 +366,8 @@ def go_video_bot(call):
     users_db.setdefault(chat_id, {"stage": "start", "name": call.from_user.first_name or "User"})
     users_db[chat_id]["path"] = "video_bot"
 
+    ga4_track(call.from_user.id, "portal_open", {"portal": "video"})
+
     send_comic(chat_id, "video_generator")
     bot.send_message(chat_id, t("messages.video_bot_opened", ""))
 
@@ -348,6 +378,8 @@ def go_learning(call):
     users_db.setdefault(chat_id, {"stage": "start", "name": call.from_user.first_name or "User"})
     users_db[chat_id]["stage"] = "start"
     users_db[chat_id]["path"] = "learning"
+
+    ga4_track(call.from_user.id, "portal_open", {"portal": "learning"})
 
     send_comic(chat_id, "avatar_choice")
 
@@ -365,13 +397,15 @@ def go_hackathon(call):
     users_db[chat_id]["path"] = "hackathon"
     users_db[chat_id]["stage"] = "hackathon_qualify"
 
+    ga4_track(call.from_user.id, "portal_open", {"portal": "hackathon"})
+
     send_comic(chat_id, "hackathon")
     bot.send_message(chat_id, t("messages.hack_arena_open", ""), parse_mode="Markdown")
 
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(types.InlineKeyboardButton(btn("buttons.hack_tier_spec", "⚡ Спец"), callback_data="hack_tier_spec"))
     markup.add(types.InlineKeyboardButton(btn("buttons.hack_tier_genius", "💥 Гений"), callback_data="hack_tier_genius"))
-    markup.add(types.InlineKeyboardButton(btn("buttons.hack_tier_project", "🤖 ИИ‑проект"), callback_data="hack_tier_project"))
+    markup.add(types.InlineKeyboardButton(btn("buttons.hack_tier_project", "🤖 Уже есть ИИ‑проект"), callback_data="hack_tier_project"))
     bot.send_message(chat_id, t("messages.hack_your_level", "Твой уровень:"), reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data in ["hack_tier_spec", "hack_tier_genius", "hack_tier_project"])
@@ -379,13 +413,13 @@ def hackathon_qualify(call):
     ack(call, remove_keyboard=True)
     chat_id = call.message.chat.id
     users_db.setdefault(chat_id, {"stage": "start", "name": call.from_user.first_name or "User"})
-    users_db[chat_id]["hackathon_tier"] = call.data.replace("hack_tier_", "")
+    tier = call.data.replace("hack_tier_", "")
+    users_db[chat_id]["hackathon_tier"] = tier
     users_db[chat_id]["stage"] = "hackathon_registration_wait_phone"
 
-    # One screen = one comic about registration.
-    send_comic(chat_id, "hackathon_register")
+    ga4_track(call.from_user.id, "hackathon_tier_select", {"tier": tier})
 
-    # Optional videonote; short fallback only
+    send_comic(chat_id, "hackathon_register")
     safe_send_video_note(chat_id, KSON_HACKATHON_VIDEO_NOTE_FILE_ID, t("kson.hackathon_fallback", ""))
 
     bot.send_message(chat_id, t("messages.ask_phone", "📱 Телефон:"))
@@ -396,6 +430,8 @@ def path_select(call):
     chat_id = call.message.chat.id
     users_db.setdefault(chat_id, {"stage": "start", "name": call.from_user.first_name or "User"})
     users_db[chat_id]["path"] = call.data
+
+    ga4_track(call.from_user.id, "avatar_select", {"avatar": call.data})
 
     if call.data in ["freelancer", "artist"]:
         send_comic(chat_id, "professions_overview")
@@ -424,6 +460,9 @@ def other_specialty(call):
     chat_id = call.message.chat.id
     users_db.setdefault(chat_id, {"stage": "start", "name": call.from_user.first_name or "User"})
     users_db[chat_id]["stage"] = "waiting_specialty_text"
+
+    ga4_track(call.from_user.id, "specialty_other_start")
+
     bot.send_message(chat_id, t("messages.other_specialty_ask", ""))
 
 @bot.callback_query_handler(func=lambda c: c.data in ["copywriting", "design", "marketing", "analytics", "management", "video_creator"])
@@ -433,6 +472,8 @@ def specialty_select(call):
     users_db.setdefault(chat_id, {"stage": "start", "name": call.from_user.first_name or "User"})
     users_db[chat_id]["specialty"] = call.data
 
+    ga4_track(call.from_user.id, "specialty_select", {"specialty": call.data})
+
     prof_key_map = {
         "management": "prof_management",
         "analytics": "prof_analytics",
@@ -441,7 +482,6 @@ def specialty_select(call):
         "marketing": "prof_marketing",
         "video_creator": "professions_overview"
     }
-    # Keep profession comic (class) AND then levels? -> remove duplicate meaning by not sending levels comic here.
     send_comic(chat_id, prof_key_map.get(call.data, "professions_overview"))
 
     markup = types.InlineKeyboardMarkup(row_width=1)
@@ -463,8 +503,11 @@ def level_select(call):
     users_db[chat_id]["current_level"] = level
     users_db[chat_id]["stage"] = "waiting_result"
 
+    ga4_track(call.from_user.id, "level_select", {"level": level, "specialty": specialty})
+
     prompt_key = f"level{level}_{specialty}"
     if prompt_key not in PROMPTS:
+        ga4_track(call.from_user.id, "prompt_missing", {"key": prompt_key})
         bot.send_message(chat_id, t("messages.level_prompt_missing", ""))
         return
 
@@ -477,11 +520,8 @@ def level_select(call):
             prompt = prompt + f"\n\nКонтекст пользователя: его сфера — {ctx}."
 
     bot.send_message(chat_id, t("messages.prompt_task_title", "", level=level, prompt=prompt), parse_mode="Markdown")
-
-    # Optional: send videonote; fallback is short
     safe_send_video_note(chat_id, KSON_SUCCESS_VIDEO_NOTE_FILE_ID, t("kson.success_fallback", ""))
 
-    # Combine instructions + done prompt into one message (so fewer blocks)
     text = t("perplexity.help", "")
     done_line = t("messages.perplexity_done_prompt", "")
     if done_line:
@@ -504,6 +544,8 @@ def done(call):
     users_db.setdefault(chat_id, {"stage": "start", "name": call.from_user.first_name or "User"})
     users_db[chat_id]["stage"] = "waiting_phone"
 
+    ga4_track(call.from_user.id, "done_click")
+
     send_comic(chat_id, "contacts")
 
     rnd = pick_after_done()
@@ -517,6 +559,7 @@ def handle_text(msg):
     chat_id = msg.chat.id
 
     if chat_id not in users_db:
+        ga4_track(msg.from_user.id, "unknown_user_text")
         bot.send_message(chat_id, t("messages.unknown_user_start", "Напиши /start"))
         return
 
@@ -527,11 +570,10 @@ def handle_text(msg):
         users_db[chat_id]["specialty_text"] = (msg.text or "").strip()
         users_db[chat_id]["stage"] = "waiting_result"
 
-        # Show levels selection for "other": no duplicate levels comic needed if you already want 1 screen.
-        send_comic(chat_id, "levels_3")
+        ga4_track(msg.from_user.id, "specialty_other_submit")
 
+        send_comic(chat_id, "levels_3")
         markup = types.InlineKeyboardMarkup(row_width=1)
-        # Keep same behavior as your original code: it routes to analytics prompts.
         markup.add(types.InlineKeyboardButton(btn("buttons.level_1", "📚 Уровень 1"), callback_data="level_1_analytics"))
         markup.add(types.InlineKeyboardButton(btn("buttons.level_2", "📘 Уровень 2"), callback_data="level_2_analytics"))
         markup.add(types.InlineKeyboardButton(btn("buttons.level_3", "📕 Уровень 3"), callback_data="level_3_analytics"))
@@ -542,8 +584,12 @@ def handle_text(msg):
         if is_valid_phone(msg.text):
             users_db[chat_id]["phone"] = msg.text
             users_db[chat_id]["stage"] = "hackathon_registration_wait_email"
+
+            ga4_track(msg.from_user.id, "phone_submitted", {"flow": "hackathon"})
+
             bot.send_message(chat_id, t("messages.ask_email", ""))
         else:
+            ga4_track(msg.from_user.id, "phone_invalid", {"flow": "hackathon"})
             bot.send_message(chat_id, t("messages.invalid_phone", ""))
         return
 
@@ -562,6 +608,8 @@ def handle_text(msg):
                 extra={"🏆 Лига": tier},
             )
 
+            ga4_track(msg.from_user.id, "lead_sent", {"path": "hackathon", "tier": tier})
+
             checklist = t("checklist.ai_checklist_text", "")
             bot.send_message(chat_id, t("messages.final_hack_registered", "", checklist=checklist), parse_mode="Markdown")
 
@@ -573,6 +621,7 @@ def handle_text(msg):
 
             users_db[chat_id]["stage"] = "start"
         else:
+            ga4_track(msg.from_user.id, "email_invalid", {"flow": "hackathon"})
             bot.send_message(chat_id, t("messages.invalid_email", ""))
         return
 
@@ -580,8 +629,12 @@ def handle_text(msg):
         if is_valid_phone(msg.text):
             users_db[chat_id]["phone"] = msg.text
             users_db[chat_id]["stage"] = "waiting_email"
+
+            ga4_track(msg.from_user.id, "phone_submitted", {"flow": "learning"})
+
             bot.send_message(chat_id, t("messages.ask_email", ""))
         else:
+            ga4_track(msg.from_user.id, "phone_invalid", {"flow": "learning"})
             bot.send_message(chat_id, t("messages.invalid_phone", ""))
         return
 
@@ -601,6 +654,12 @@ def handle_text(msg):
 
             send_lead_to_admin(name, phone, msg.text, path, specialty, level, extra=extra)
 
+            ga4_track(
+                msg.from_user.id,
+                "lead_sent",
+                {"path": path or "learning", "specialty": specialty or "-", "level": str(level or "-")}
+            )
+
             checklist = t("checklist.ai_checklist_text", "")
             bot.send_message(chat_id, t("messages.final_contacts_received", "", checklist=checklist), parse_mode="Markdown")
 
@@ -612,9 +671,11 @@ def handle_text(msg):
 
             users_db[chat_id]["stage"] = "start"
         else:
+            ga4_track(msg.from_user.id, "email_invalid", {"flow": "learning"})
             bot.send_message(chat_id, t("messages.invalid_email", ""))
         return
 
+    ga4_track(msg.from_user.id, "need_start")
     bot.send_message(chat_id, t("messages.need_start", "Чтобы начать — напиши /start"))
 
 # ================== LOAD PERSISTED IMAGES ==================
