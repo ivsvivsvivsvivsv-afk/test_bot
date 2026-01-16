@@ -40,7 +40,10 @@ app = Flask(__name__)
 users_db = {}
 
 # ================== GA4 TRACKING ==================
-def ga4_track(user_id: int, event_name: str, params: dict | None = None):
+from typing import Optional, Dict, Any
+
+def ga4_track(user_id: int, event_name: str, params: Optional[Dict[str, Any]] = None):
+    ...
     if not GA4_MEASUREMENT_ID or not GA4_API_SECRET:
         return
 
