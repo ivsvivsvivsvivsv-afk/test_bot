@@ -10,7 +10,7 @@ from telebot import types
 from flask import Flask, request
 
 # ================== ENV ==================
-API_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+API_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN" )
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://rs-zhurkinigor.amvera.io")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 ADMIN_IDS = os.getenv("ADMIN_IDS", "0")
