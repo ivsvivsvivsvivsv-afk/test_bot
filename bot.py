@@ -10,7 +10,7 @@ from telebot import types
 from flask import Flask, request
 
 # ================== ENV ==================
-API_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN" )
+API_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://rs-zhurkinigor.amvera.io")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 ADMIN_IDS = os.getenv("ADMIN_IDS", "0")
@@ -144,7 +144,8 @@ def safe_send_video_note(chat_id, file_id, fallback_text):
         bot.send_message(chat_id, fallback_text, parse_mode="Markdown")
     return False
 
-# ================== COMICS (15 images) ==================
+# ================== COMICS (images) ==================
+# +++ ADDED 3 KEYS: lore_entry, lore_archive, lore_observer
 IMAGES = {
     "command_center": "",
     "video_generator": "",
@@ -164,6 +165,11 @@ IMAGES = {
     "hackathon": "",
     "hackathon_qualify": "",
     "hackathon_register": "",
+
+    # --- NEW LORE KEYS ---
+    "lore_entry": "",     # after /start
+    "lore_archive": "",   # before task prompt
+    "lore_observer": ""   # after done, before contacts/phone
 }
 
 def webhook_path():
@@ -227,9 +233,9 @@ PROMPTS = {
     "level2_management": "Я менеджер проектов/операционный менеджер. Составь систему управления задачами с ИИ: как вести бэклог, приоритизацию, статусы, риски, коммуникации и отчеты, чтобы экономить 5–10 часов в неделю. Дай шаблоны промптов и регламент на 7 дней внедрения.",
     "level3_management": "Я руководитель. Создай архитектуру 'ИИ-операционного ассистента': процессы, роли, входные данные, шаблоны, контроль качества и метрики эффективности. Цель: ускорить принятие решений и снизить ручной менеджмент в 3–5 раз. Дай пошаговый roadmap внедрения.",
 
-    "level1_video_creator": "Я видео‑креатор. Придумай 10 вирусных идей коротких видео (Reels/TikTok) под мою нишу [укажи нишу]. Для каждой: хук 2 секунды, сценарий 15–30 сек, CTA, и какая эмоция должна быть в кадре.",
-    "level2_video_creator": "Я видео‑креатор. Составь контент‑систему на 30 дней: рубрики, частота, форматы, сценарные шаблоны, чек‑лист монтажа и публикации. Укажи, как использовать ИИ (сценарий, субтитры, монтаж, обложки).",
-    "level3_video_creator": "Я видео‑креатор/продюсер. Создай стратегию масштабирования: команда, пайплайн, инструменты ИИ, метрики, бюджет, и план на 12 недель для роста. Дай риск‑менеджмент и шаблоны промптов."
+    "level1_video_creator": "Я видео-креатор. Придумай 10 вирусных идей коротких видео (Reels/TikTok) под мою нишу [укажи нишу]. Для каждой: хук 2 секунды, сценарий 15–30 сек, CTA, и какая эмоция должна быть в кадре.",
+    "level2_video_creator": "Я видео-креатор. Составь контент-систему на 30 дней: рубрики, частота, форматы, сценарные шаблоны, чек-лист монтажа и публикации. Укажи, как использовать ИИ (сценарий, субтитры, монтаж, обложки).",
+    "level3_video_creator": "Я видео-креатор/продюсер. Создай стратегию масштабирования: команда, пайплайн, инструменты ИИ, метрики, бюджет, и план на 12 недель для роста. Дай риск-менеджмент и шаблоны промптов."
 }
 
 # ================== VALIDATION / LEADS ==================
@@ -353,6 +359,10 @@ def start(msg):
 
     ga4_track(msg.from_user.id, "bot_start")
 
+    # --- NEW: lore entry (3-panel intro) right after /start
+    send_comic(chat_id, "lore_entry")
+
+    # existing
     send_comic(chat_id, "command_center")
     safe_send_video_note(chat_id, KSON_START_VIDEO_NOTE_FILE_ID, t("kson.start_fallback", ""))
 
@@ -408,7 +418,7 @@ def go_hackathon(call):
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(types.InlineKeyboardButton(btn("buttons.hack_tier_spec", "⚡ Спец"), callback_data="hack_tier_spec"))
     markup.add(types.InlineKeyboardButton(btn("buttons.hack_tier_genius", "💥 Гений"), callback_data="hack_tier_genius"))
-    markup.add(types.InlineKeyboardButton(btn("buttons.hack_tier_project", "🤖 Уже есть ИИ‑проект"), callback_data="hack_tier_project"))
+    markup.add(types.InlineKeyboardButton(btn("buttons.hack_tier_project", "🤖 Уже есть ИИ-проект"), callback_data="hack_tier_project"))
     bot.send_message(chat_id, t("messages.hack_your_level", "Твой уровень:"), reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data in ["hack_tier_spec", "hack_tier_genius", "hack_tier_project"])
@@ -445,7 +455,7 @@ def path_select(call):
         markup.add(types.InlineKeyboardButton(btn("buttons.prof_copywriting", "✍️ Копирайтинг"), callback_data="copywriting"))
         markup.add(types.InlineKeyboardButton(btn("buttons.prof_design", "🎨 Дизайн"), callback_data="design"))
         markup.add(types.InlineKeyboardButton(btn("buttons.prof_marketing", "📊 Маркетинг"), callback_data="marketing"))
-        markup.add(types.InlineKeyboardButton(btn("buttons.prof_video_creator", "🎬 Видео‑креатор"), callback_data="video_creator"))
+        markup.add(types.InlineKeyboardButton(btn("buttons.prof_video_creator", "🎬 Видео-креатор"), callback_data="video_creator"))
         markup.add(types.InlineKeyboardButton(btn("buttons.prof_other", "✍️ Другое"), callback_data="other_specialty"))
 
         bot.send_message(chat_id, t("messages.freelancer_professions_title", ""), parse_mode="Markdown", reply_markup=markup)
@@ -514,6 +524,9 @@ def level_select(call):
         bot.send_message(chat_id, t("messages.level_prompt_missing", ""))
         return
 
+    # --- NEW: lore archive BEFORE the task artifact/prompt
+    send_comic(chat_id, "lore_archive")
+
     send_comic(chat_id, "prompt_artifact")
 
     prompt = PROMPTS[prompt_key]
@@ -549,6 +562,10 @@ def done(call):
 
     ga4_track(call.from_user.id, "done_click")
 
+    # --- NEW: observer after task is done (before contacts/phone)
+    send_comic(chat_id, "lore_observer")
+
+    # existing contacts comic kept (you can remove it if you want only observer)
     send_comic(chat_id, "contacts")
 
     rnd = pick_after_done()
