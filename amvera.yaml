@@ -5,7 +5,9 @@ meta:
     version: 3.11
 
 build:
-  requirementsPath: requirements.txt
+  commands:
+    - pip install --upgrade pip
+    - pip install -r requirements.txt
 
 run:
   persistenceMount: /data
