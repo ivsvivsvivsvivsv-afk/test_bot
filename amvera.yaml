@@ -1,0 +1,14 @@
+version: "1"
+
+services:
+  worker:
+    command: "python bot.py"
+    env:
+      - BOT_TOKEN
+      - ADMIN_IDS
+      - ADMIN_USERNAME
+      - GENERATOR_BOT_URL
+    build:
+      type: python
+      python_version: "3.11"
+      requirements: requirements.txt
