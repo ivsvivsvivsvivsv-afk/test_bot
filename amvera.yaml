@@ -1,14 +1,9 @@
 meta:
-  environment: python
-  toolchain:
-    name: pip
-    version: 3.11
+  environment: docker
 
 build:
-  commands:
-    - pip install --upgrade pip
-    - pip install -r requirements.txt
+  dockerfile: Dockerfile
 
 run:
   persistenceMount: /data
-  command: python3 bot.py
+  command: python bot.py
