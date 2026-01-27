@@ -3,7 +3,9 @@ from pathlib import Path
 from typing import Optional
 
 
+from pathlib import Path
 DB_PATH = Path("/data/database.db")
+
 
 
 async def init_db():
