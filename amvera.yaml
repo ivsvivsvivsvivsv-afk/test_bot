@@ -1,14 +1,12 @@
-version: "1"
+meta:
+  environment: python
+  toolchain:
+    name: pip
+    version: 3.11
 
-services:
-  worker:
-    command: "python bot.py"
-    env:
-      - BOT_TOKEN
-      - ADMIN_IDS
-      - ADMIN_USERNAME
-      - GENERATOR_BOT_URL
-    build:
-      type: python
-      python_version: "3.11"
-      requirements: requirements.txt
+build:
+  requirementsPath: requirements.txt
+
+run:
+  persistenceMount: /data
+  command: python3 bot.py
