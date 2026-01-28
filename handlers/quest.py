@@ -99,7 +99,6 @@ async def answer(cb: CallbackQuery):
 
     await update_user(cb.from_user.id, score=score)
 
-    # head messages
     head_key = f"round{rn}_cut" if is_correct else f"round{rn}_alive"
     head_message = MESSAGES["head_messages"].get(head_key, "")
 
@@ -109,7 +108,6 @@ async def answer(cb: CallbackQuery):
         continue_message = "Продолжаем." if rn < 3 else "Это был последний раунд."
         result_text = MESSAGES["result_wrong"].format(score=score, continue_message=continue_message)
 
-    # раунды 1-2 → кнопка next_round
     if rn < 3:
         await update_user(cb.from_user.id, state=f"round_{rn}_result")
         await cb.message.edit_text(result_text, reply_markup=kb_next_round(rn + 1))
@@ -121,7 +119,9 @@ async def answer(cb: CallbackQuery):
 
     # prize candidate notify (3/3)
     if score >= 3:
-        await notify_admin(cb.message.bot, build_prize_candidate(user | {"score": score}))
+        user_for_admin = dict(user)
+        user_for_admin["score"] = score
+        await notify_admin(cb.message.bot, build_prize_candidate(user_for_admin))
 
     victory_block = MESSAGES["victory_full"] if score >= 3 else MESSAGES["victory_partial"].format(score=score)
     await cb.message.edit_text(result_text + "\n\n" + victory_block, reply_markup=kb_show_moral())
@@ -136,4 +136,17 @@ async def next_round(cb: CallbackQuery):
 
 @router.callback_query(F.data == "show_moral")
 async def show_moral(cb: CallbackQuery):
+    # экран морали + кнопка "хочу на воркшоп"
+    await update_user(cb.from_user.id, state="moral")
+    await cb.message.edit_text(MESSAGES["moral"], reply_markup=kb_want_workshop())
+    await cb.answer()
+
+
+@router.callback_query(F.data == "want_workshop")
+async def want_workshop(cb: CallbackQuery):
+    # после морали → сбор контактов (phone/email) в contacts.py
+    await update_user(cb.from_user.id, state="wait_phone")
+    await cb.message.answer(MESSAGES["ask_phone"])
+    await cb.answer()
+
 
