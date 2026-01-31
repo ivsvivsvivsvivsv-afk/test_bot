@@ -1,56 +1,80 @@
 import os
 import aiosqlite
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Any
 
-# In Amvera /data is persistent. We default there.
-DEFAULT_DB_PATH = os.getenv("DB_PATH") or os.getenv("DATABASE_PATH") or "/data/bot.db"
+# Persistent DB location (Amvera keeps /data)
+DEFAULT_DB_PATH = "/data/bot.db"
 
+def _db_path() -> str:
+    # Prefer explicit envs if you ever set them
+    return (
+        os.getenv("DB_PATH")
+        or os.getenv("DATABASE_PATH")
+        or os.getenv("DATABASE_URL")  # in case you pass a file path here
+        or DEFAULT_DB_PATH
+    )
 
-async def _ensure_images_table(db_path: str) -> None:
-    async with aiosqlite.connect(db_path) as db:
-        await db.execute("""
+async def _ensure_table(conn: aiosqlite.Connection) -> None:
+    await conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS images (
             key TEXT PRIMARY KEY,
-            kind TEXT NOT NULL,
+            kind TEXT NOT NULL,         -- 'photo' or 'document'
             file_id TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
-        """)
-        await db.commit()
+        """
+    )
+    await conn.commit()
 
+async def get_image(key: str) -> Optional[Tuple[str, str]]:
+    """Return (kind, file_id) or None."""
+    db_path = _db_path()
+    async with aiosqlite.connect(db_path) as conn:
+        await _ensure_table(conn)
+        async with conn.execute("SELECT kind, file_id FROM images WHERE key = ?", (key,)) as cur:
+            row = await cur.fetchone()
+            if not row:
+                return None
+            return row[0], row[1]
 
-async def _get_image(db_path: str, key: str) -> Optional[Tuple[str, str]]:
-    await _ensure_images_table(db_path)
-    async with aiosqlite.connect(db_path) as db:
-        cur = await db.execute("SELECT kind, file_id FROM images WHERE key=?", (key,))
-        row = await cur.fetchone()
-        await cur.close()
-    return row if row else None
+def _unwrap_target(target: Any):
+    """Accept Message or CallbackQuery; return object that has answer_* methods."""
+    # If it's a CallbackQuery, prefer its message
+    msg = getattr(target, "message", None)
+    return msg if msg is not None else target
 
-
-async def send_image_if_exists(target, key: str, db_path: str = DEFAULT_DB_PATH) -> bool:
+async def send_image_if_exists(target: Any, key: str) -> bool:
     """
-    Compatibility helper expected by handlers/start.py:
-        from utils.images import send_image_if_exists
-
-    target: aiogram.types.Message or CallbackQuery.message
-    key: image key like 'img_start_portal'
-    Returns True if an image was found and sent.
+    Try to send image for key. Returns True if sent.
+    Supports both photo and document kinds stored in DB.
     """
-    row = await _get_image(db_path, key)
-    if not row:
+    t = _unwrap_target(target)
+
+    rec = await get_image(key)
+    if not rec:
         return False
-    kind, file_id = row
 
-    # target can be Message or CallbackQuery or any object with answer_* methods.
-    # In aiogram v3, Message has answer_photo/answer_document.
+    kind, file_id = rec
+
+    # Some aiogram objects support answer_*; Message does, CallbackQuery doesn't (hence unwrap)
     if kind == "document":
-        await target.answer_document(file_id)
+        await t.answer_document(file_id)
     else:
-        await target.answer_photo(file_id)
+        await t.answer_photo(file_id)
     return True
 
+def resolve_round_intro_image_key(weapon: Optional[str], round_num: int) -> str:
+    """
+    Key resolver used by quest flow:
+      - Round 1 depends on chosen profession/weapon: img_round_1_intro_<weapon>
+      - Other rounds: img_round_<n>_intro
+    Falls back should be handled by caller (try generic key if specific missing).
+    """
+    if round_num == 1 and weapon:
+        return f"img_round_1_intro_{weapon}"
+    return f"img_round_{round_num}_intro"
 
-# Backward/alternative name that some patches used.
-async def send_image_by_key(target, key: str, db_path: str = DEFAULT_DB_PATH) -> bool:
-    return await send_image_if_exists(target, key, db_path=db_path)
+# Backwards/forwards compatibility aliases (in case other files import these)
+async def send_image_by_key(target: Any, key: str) -> bool:
+    return await send_image_if_exists(target, key)
