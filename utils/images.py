@@ -1,8 +1,21 @@
 import json
+import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
-IMAGES_PATH = Path("images.json")
+def _default_images_path() -> Path:
+    # 1) explicit env
+    env_path = os.getenv("IMAGES_PATH")
+    if env_path:
+        return Path(env_path)
+    # 2) common container path
+    app_path = Path("/app/images.json")
+    if app_path.exists():
+        return app_path
+    # 3) repo root
+    return Path("images.json")
+
+IMAGES_PATH = _default_images_path()
 
 def _load_images() -> dict:
     if not IMAGES_PATH.exists():
@@ -20,25 +33,24 @@ def get_image_file_id(image_key: str) -> Optional[str]:
     """
     data = _load_images()
     value = data.get(image_key)
-    if not value:
+    if value is None:
         return None
     value = str(value).strip()
     return value or None
 
-def resolve_round_intro_image_key(round_num: int, weapon: str) -> list[str]:
+def resolve_round_intro_image_key(round_num: int, weapon: str) -> List[str]:
     """
     Returns ordered list of candidate keys for round intro image.
-    Requirement: round 1 intro can depend on profession (weapon).
+    Round 1 intro can depend on profession (weapon).
     """
     weapon = (weapon or "other").strip().lower()
-    keys = []
-    # round 1: per-profession first, then fallback
+    keys: List[str] = []
     if round_num == 1:
         keys.append(f"img_round_1_intro_{weapon}")
     keys.append(f"img_round_{round_num}_intro")
     return keys
 
-async def send_image_if_exists(message, image_key_candidates: list[str]) -> bool:
+async def send_image_if_exists(message, image_key_candidates: List[str]) -> bool:
     """
     Sends first existing image (by file_id) and returns True if sent.
     Does nothing if no file_id configured.
