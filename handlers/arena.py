@@ -6,6 +6,7 @@ from database import get_user, update_user
 from texts import MESSAGES
 from utils.validation import validate_phone, validate_email
 from utils.notifications import notify_admin, build_lead_arena
+from keyboards.inline import kb_go_to_quest
 from utils.db_filters import DBStateFilter
 
 router = Router()
@@ -46,5 +47,5 @@ async def arena_flow(message: Message):
         text = build_lead_arena(fresh, timestamp=datetime.now().strftime("%Y-%m-%d %H:%M"))
         await notify_admin(message.bot, text)
 
-        await message.answer(MESSAGES["arena_complete"])
+        await message.answer(MESSAGES["arena_complete"], reply_markup=kb_go_to_quest())
         return

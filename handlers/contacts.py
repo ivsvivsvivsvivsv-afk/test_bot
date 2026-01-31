@@ -7,6 +7,7 @@ from utils.validation import validate_phone, validate_email
 from utils.notifications import notify_admin, build_lead_workshop
 from utils.db_filters import DBStateFilter
 from texts import MESSAGES, WEAPON_LABELS
+from keyboards.inline import kb_open_generator
 
 router = Router()
 
@@ -49,5 +50,5 @@ async def contacts_flow(message: Message):
         text = build_lead_workshop(fresh, actions=actions, duration=duration)
         await notify_admin(message.bot, text)
 
-        await message.answer(MESSAGES["final"])
+        await message.answer(MESSAGES["final"], reply_markup=kb_open_generator())
         return
