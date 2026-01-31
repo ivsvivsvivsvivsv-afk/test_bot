@@ -32,9 +32,21 @@ def _save_images(data: dict) -> None:
     IMAGES_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+async def _deny(msg: Message) -> bool:
+    if _is_admin(msg.from_user.id):
+        return False
+    await msg.answer(
+        "⛔️ Доступ только админу.\n"
+        f"Твой Telegram ID: {msg.from_user.id}\n\n"
+        "Добавь его в переменную окружения ADMIN_IDS (через запятую) и перезапусти бота.\n"
+        "Пример: ADMIN_IDS=190421400,758800494"
+    )
+    return True
+
+
 @router.message(Command("imgkeys"))
 async def imgkeys(msg: Message):
-    if not _is_admin(msg.from_user.id):
+    if await _deny(msg):
         return
     data = _load_images()
     if not data:
@@ -46,7 +58,7 @@ async def imgkeys(msg: Message):
 
 @router.message(Command("imgset"))
 async def imgset(msg: Message, command: CommandObject):
-    if not _is_admin(msg.from_user.id):
+    if await _deny(msg):
         return
     if not command.args:
         await msg.answer("Используй: /imgset <key>\nПример: /imgset img_round_1_intro_marketing")
@@ -67,7 +79,7 @@ async def imgset(msg: Message, command: CommandObject):
 
 @router.message(Command("imgget"))
 async def imgget(msg: Message, command: CommandObject):
-    if not _is_admin(msg.from_user.id):
+    if await _deny(msg):
         return
     if not command.args:
         await msg.answer("Используй: /imgget <key>")
@@ -79,7 +91,7 @@ async def imgget(msg: Message, command: CommandObject):
 
 @router.message(Command("imgdel"))
 async def imgdel(msg: Message, command: CommandObject):
-    if not _is_admin(msg.from_user.id):
+    if await _deny(msg):
         return
     if not command.args:
         await msg.answer("Используй: /imgdel <key>")
@@ -96,7 +108,7 @@ async def imgdel(msg: Message, command: CommandObject):
 
 @router.message(F.photo)
 async def on_photo(msg: Message):
-    if not _is_admin(msg.from_user.id):
+    if await _deny(msg):
         return
     key = _pending_key.get(msg.from_user.id)
     if not key:
@@ -111,7 +123,7 @@ async def on_photo(msg: Message):
 
 @router.message(F.document)
 async def on_document(msg: Message):
-    if not _is_admin(msg.from_user.id):
+    if await _deny(msg):
         return
     key = _pending_key.get(msg.from_user.id)
     if not key:
