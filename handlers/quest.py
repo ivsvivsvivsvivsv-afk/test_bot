@@ -8,6 +8,7 @@ from keyboards.inline import (
 from texts import MESSAGES, ROUND_NAMES
 from utils.statements import get_statement_for_round
 from utils.notifications import notify_admin, build_prize_candidate
+from utils.images import resolve_round_intro_image_key, send_image_if_exists
 from utils.db_filters import DBStateFilter
 
 router = Router()
@@ -68,6 +69,16 @@ async def _send_round_intro(target, round_num: int):
         statement=data["statement"],
         wisdom_prompt=data["wisdom_prompt"],
     )
+
+    # optional: send round intro image (configured via images.json)
+    try:
+        candidates = resolve_round_intro_image_key(round_num, weapon)
+        if hasattr(target, "message"):
+            await send_image_if_exists(target.message, candidates)
+        else:
+            await send_image_if_exists(target, candidates)
+    except Exception:
+        pass
 
     if hasattr(target, "message"):  # CallbackQuery
         await target.message.edit_text(text, reply_markup=kb_go_check())
