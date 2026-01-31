@@ -5,6 +5,7 @@ from aiogram.types import Message, CallbackQuery
 from database import create_user, get_user, update_user
 from keyboards.inline import kb_start, kb_class
 from texts import MESSAGES, URLS
+from utils.images import send_image_if_exists
 
 router = Router()
 
@@ -17,10 +18,12 @@ async def cmd_start(message: Message):
         user = await get_user(message.from_user.id)
 
     if user and user.get("quest_completed"):
+        await send_image_if_exists(message, ['img_already_played', 'img_start_portal'])
         await message.answer(MESSAGES["already_played"], reply_markup=kb_start())
         return
 
     await update_user(message.from_user.id, state="start")
+    await send_image_if_exists(message, ['img_start_portal'])
     await message.answer(MESSAGES["start"], reply_markup=kb_start())
 
 
@@ -44,5 +47,6 @@ async def start_quest(cb: CallbackQuery):
         other_sphere=None,
         quest_started_at=int(time.time()),
     )
+    await send_image_if_exists(cb.message, ['img_class_choice'])
     await cb.message.edit_text(MESSAGES["class_choice"], reply_markup=kb_class())
     await cb.answer()
