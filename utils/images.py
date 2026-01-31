@@ -1,67 +1,71 @@
-from typing import Optional, List, Sequence
+import os
+from typing import Optional, Tuple
 
-from database import get_image
+import aiosqlite
 
-def resolve_round_intro_image_key(round_num: int, weapon: str) -> List[str]:
+
+def _db_path() -> str:
+    for var in ("DB_PATH", "DATABASE_PATH"):
+        v = os.getenv(var)
+        if v:
+            return v
+    try:
+        import database  # type: ignore
+        for attr in ("DB_PATH", "DATABASE_PATH"):
+            if hasattr(database, attr):
+                return str(getattr(database, attr))
+    except Exception:
+        pass
+    return "/data/bot.db"
+
+
+def _images_table_sql() -> str:
+    return (
+        "CREATE TABLE IF NOT EXISTS images ("
+        "key TEXT PRIMARY KEY,"
+        "kind TEXT NOT NULL,"
+        "file_id TEXT NOT NULL,"
+        "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+        ");"
+    )
+
+
+async def _ensure_images_table(db: aiosqlite.Connection) -> None:
+    await db.execute(_images_table_sql())
+
+
+async def get_image(key: str) -> Optional[Tuple[str, str]]:
+    key = (key or "").strip()
+    if not key:
+        return None
+    async with aiosqlite.connect(_db_path()) as db:
+        await _ensure_images_table(db)
+        cur = await db.execute("SELECT kind, file_id FROM images WHERE key = ?", (key,))
+        row = await cur.fetchone()
+        return (row[0], row[1]) if row else None
+
+
+async def send_image(target, key: str) -> bool:
+    """Send image by key to Message or CallbackQuery.message.
+
+    Returns True if sent, False if no image.
     """
-    Returns ordered list of candidate keys for round intro image.
-    Round 1 intro can depend on profession (weapon).
-    """
-    weapon = (weapon or "other").strip().lower()
-    keys: List[str] = []
-    if round_num == 1:
-        keys.append(f"img_round_1_intro_{weapon}")
-    keys.append(f"img_round_{round_num}_intro")
-    return keys
+    row = await get_image(key)
+    if not row:
+        return False
+
+    kind, file_id = row
+
+    # allow passing CallbackQuery or Message
+    if hasattr(target, "message") and target.message is not None:
+        target = target.message
+
+    if kind == "doc":
+        await target.answer_document(file_id)
+    else:
+        await target.answer_photo(file_id)
+    return True
 
 
-def _normalize_kind_and_id(kind: Optional[str], file_id: Optional[str]) -> tuple[str, str]:
-    """Backwards compatible: supports values stored as 'photo:<id>' / 'doc:<id>' in file_id."""
-    k = (kind or "photo").strip().lower()
-    fid = (file_id or "").strip()
-
-    # If old format is in fid itself
-    if ":" in fid and k in ("photo", "doc", "document"):
-        prefix, rest = fid.split(":", 1)
-        prefix = prefix.strip().lower()
-        rest = rest.strip()
-        if prefix in ("photo", "doc") and rest:
-            return prefix, rest
-
-    if k == "document":
-        k = "doc"
-    if k not in ("photo", "doc"):
-        k = "photo"
-    return k, fid
-
-
-async def send_image_if_exists(message, image_key_candidates: Sequence[str]) -> bool:
-    """Sends first existing image (stored in DB) and returns True if sent."""
-    for key in image_key_candidates:
-        try:
-            row = await get_image(key)
-        except Exception:
-            row = None
-
-        if not row:
-            continue
-
-        kind, file_id = row[0], row[1]
-        kind, file_id = _normalize_kind_and_id(kind, file_id)
-        if not file_id:
-            continue
-
-        try:
-            if kind == "doc":
-                await message.answer_document(file_id)
-            else:
-                await message.answer_photo(file_id)
-            return True
-        except Exception:
-            # Try alternative method
-            try:
-                await message.answer_document(file_id)
-                return True
-            except Exception:
-                continue
-    return False
+# Backward-compatible alias names (in case your code calls them)
+send_image_by_key = send_image
