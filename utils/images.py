@@ -1,42 +1,6 @@
-import json
-import os
-from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Sequence
 
-def _default_images_path() -> Path:
-    # 1) explicit env
-    env_path = os.getenv("IMAGES_PATH")
-    if env_path:
-        return Path(env_path)
-    # 2) common container path
-    app_path = Path("/app/images.json")
-    if app_path.exists():
-        return app_path
-    # 3) repo root
-    return Path("images.json")
-
-IMAGES_PATH = _default_images_path()
-
-def _load_images() -> dict:
-    if not IMAGES_PATH.exists():
-        return {}
-    try:
-        data = json.loads(IMAGES_PATH.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-def get_image_file_id(image_key: str) -> Optional[str]:
-    """
-    Returns Telegram file_id for given image key.
-    Empty/blank values are treated as missing.
-    """
-    data = _load_images()
-    value = data.get(image_key)
-    if value is None:
-        return None
-    value = str(value).strip()
-    return value or None
+from database import get_image
 
 def resolve_round_intro_image_key(round_num: int, weapon: str) -> List[str]:
     """
@@ -50,14 +14,54 @@ def resolve_round_intro_image_key(round_num: int, weapon: str) -> List[str]:
     keys.append(f"img_round_{round_num}_intro")
     return keys
 
-async def send_image_if_exists(message, image_key_candidates: List[str]) -> bool:
-    """
-    Sends first existing image (by file_id) and returns True if sent.
-    Does nothing if no file_id configured.
-    """
+
+def _normalize_kind_and_id(kind: Optional[str], file_id: Optional[str]) -> tuple[str, str]:
+    """Backwards compatible: supports values stored as 'photo:<id>' / 'doc:<id>' in file_id."""
+    k = (kind or "photo").strip().lower()
+    fid = (file_id or "").strip()
+
+    # If old format is in fid itself
+    if ":" in fid and k in ("photo", "doc", "document"):
+        prefix, rest = fid.split(":", 1)
+        prefix = prefix.strip().lower()
+        rest = rest.strip()
+        if prefix in ("photo", "doc") and rest:
+            return prefix, rest
+
+    if k == "document":
+        k = "doc"
+    if k not in ("photo", "doc"):
+        k = "photo"
+    return k, fid
+
+
+async def send_image_if_exists(message, image_key_candidates: Sequence[str]) -> bool:
+    """Sends first existing image (stored in DB) and returns True if sent."""
     for key in image_key_candidates:
-        file_id = get_image_file_id(key)
-        if file_id:
-            await message.answer_photo(file_id)
+        try:
+            row = await get_image(key)
+        except Exception:
+            row = None
+
+        if not row:
+            continue
+
+        kind, file_id = row[0], row[1]
+        kind, file_id = _normalize_kind_and_id(kind, file_id)
+        if not file_id:
+            continue
+
+        try:
+            if kind == "doc":
+                await message.answer_document(file_id)
+            else:
+                await message.answer_photo(file_id)
             return True
+        except Exception:
+            # Try alternative method
+            try:
+                await message.answer_document(file_id)
+                return True
+            except Exception:
+                continue
     return False
