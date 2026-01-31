@@ -40,6 +40,16 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # images storage (persistent in /data/database.db)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS images (
+                key TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                file_id TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         await db.commit()
 
         # --- auto-migrations (add missing columns safely) ---
@@ -86,3 +96,54 @@ async def update_user(user_id: int, **kwargs):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(f"UPDATE users SET {fields} WHERE user_id = ?", values)
         await db.commit()
+
+
+# -------------------- images helpers --------------------
+
+async def set_image(key: str, kind: str, file_id: str) -> None:
+    """Upsert image mapping (key -> (kind, file_id)). kind: 'photo' or 'doc'."""
+    key = (key or "").strip()
+    kind = (kind or "photo").strip().lower()
+    file_id = (file_id or "").strip()
+    if not key or not file_id:
+        return
+    if kind not in ("photo", "doc", "document"):
+        kind = "photo"
+    if kind == "document":
+        kind = "doc"
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO images(key, kind, file_id, updated_at)
+                 VALUES(?, ?, ?, CURRENT_TIMESTAMP)
+                 ON CONFLICT(key) DO UPDATE SET kind=excluded.kind, file_id=excluded.file_id, updated_at=CURRENT_TIMESTAMP""",
+            (key, kind, file_id),
+        )
+        await db.commit()
+
+
+async def get_image(key: str):
+    """Returns tuple (kind, file_id) or None."""
+    key = (key or "").strip()
+    if not key:
+        return None
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT kind, file_id FROM images WHERE key = ?", (key,))
+        row = await cur.fetchone()
+        return row if row else None
+
+
+async def delete_image(key: str) -> None:
+    key = (key or "").strip()
+    if not key:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM images WHERE key = ?", (key,))
+        await db.commit()
+
+
+async def list_image_keys() -> list[str]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT key FROM images ORDER BY key")
+        rows = await cur.fetchall()
+        return [r[0] for r in rows]
