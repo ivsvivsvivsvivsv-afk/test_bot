@@ -5,6 +5,7 @@ from aiogram.enums import ParseMode
 from config import BOT_TOKEN
 from database import init_db
 from handlers import start, quest, arena, contacts
+from handlers.admin_images import router as admin_images_router
 
 
 async def main():
@@ -20,6 +21,7 @@ async def main():
     dp.include_router(quest.router)
     dp.include_router(arena.router)
     dp.include_router(contacts.router)
+    dp.include_router(admin_images_router)
 
     await dp.start_polling(bot)
 
