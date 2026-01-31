@@ -292,3 +292,7 @@ class Database:
         except Exception as e:
             logger.error(f"Error getting contacts: {e}")
             return []
+
+
+# Экспортируем публичный API модуля (для стабильных импортов)
+__all__ = ["Database"]
