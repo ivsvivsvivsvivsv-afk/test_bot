@@ -1,5 +1,6 @@
 from aiogram import Router
 from aiogram.types import Message
+from aiogram.exceptions import SkipHandler
 import time
 
 from database import get_user, update_user
@@ -14,7 +15,7 @@ router = Router()
 async def contacts_flow(message: Message):
     user = await get_user(message.from_user.id)
     if not user:
-        return
+        raise SkipHandler
 
     state = user.get("state")
 
@@ -50,3 +51,5 @@ async def contacts_flow(message: Message):
 
         await message.answer(MESSAGES["final"])
         return
+
+    raise SkipHandler

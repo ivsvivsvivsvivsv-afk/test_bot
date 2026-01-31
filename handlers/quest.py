@@ -1,5 +1,6 @@
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, Message
+from aiogram.exceptions import SkipHandler
 
 from database import get_user, update_user
 from keyboards.inline import (
@@ -26,7 +27,6 @@ async def weapon_selected(cb: CallbackQuery):
 
     if weapon == "other":
         await update_user(cb.from_user.id, weapon="other", state="weapon_other_ask")
-        # Не убираем клавиатуру с выбором оружия: пользователь может передумать и выбрать другой вариант.
         await cb.message.edit_text(MESSAGES["weapon_other_ask"], reply_markup=cb.message.reply_markup)
         await cb.answer()
         return
@@ -39,7 +39,7 @@ async def weapon_selected(cb: CallbackQuery):
 async def weapon_other_text(message: Message):
     user = await get_user(message.from_user.id)
     if not user or user.get("state") != "weapon_other_ask":
-        return
+        raise SkipHandler
 
     other = (message.text or "").strip()
     await update_user(message.from_user.id, weapon="other", other_sphere=other)
