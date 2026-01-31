@@ -1,16 +1,51 @@
-"""
-Модуль валидации данных
-=======================
+"""utils.validation
+
 Валидация телефонов (РФ, Беларусь) и email.
+
+Важно: в проекте (handlers/contacts.py) ожидается, что валидаторы возвращают
+объект с полями:
+  - is_valid: bool
+  - normalized_value: str | None
+  - error: str | None
+
+Ранее в этой папке была версия, где validate_phone/validate_email возвращали
+tuple[bool, str]. Это ломало импорт и работу handlers.
 """
+
+from __future__ import annotations
 
 import re
 import logging
+from dataclasses import dataclass
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 
-def validate_phone(phone: str) -> tuple[bool, str]:
+@dataclass(frozen=True)
+class ValidationResult:
+    """Результат валидации."""
+
+    is_valid: bool
+    normalized_value: Optional[str] = None
+    error: Optional[str] = None
+
+    @staticmethod
+    def ok(value: str) -> "ValidationResult":
+        return ValidationResult(is_valid=True, normalized_value=value, error=None)
+
+    @staticmethod
+    def fail(message: str) -> "ValidationResult":
+        return ValidationResult(is_valid=False, normalized_value=None, error=message)
+
+
+def normalize_phone(phone: str) -> Optional[str]:
+    """Нормализует телефон или возвращает None, если он невалидный."""
+    res = validate_phone(phone)
+    return res.normalized_value if res.is_valid else None
+
+
+def validate_phone(phone: str) -> ValidationResult:
     """
     Валидация и нормализация номера телефона.
     
@@ -36,7 +71,7 @@ def validate_phone(phone: str) -> tuple[bool, str]:
     """
     if not phone:
         logger.debug("Телефон пустой")
-        return False, "invalid"
+        return ValidationResult.fail("Номер телефона пустой")
     
     # Очищаем от всех символов кроме цифр и +
     phone_clean = phone.strip()
@@ -46,7 +81,7 @@ def validate_phone(phone: str) -> tuple[bool, str]:
     
     if not digits:
         logger.debug(f"Нет цифр в телефоне: {phone}")
-        return False, "invalid"
+        return ValidationResult.fail("Неверный формат номера телефона")
     
     logger.debug(f"Валидация телефона: '{phone}' -> digits='{digits}' (len={len(digits)})")
     
@@ -60,13 +95,13 @@ def validate_phone(phone: str) -> tuple[bool, str]:
             if operator in valid_operators:
                 result = f"+{digits}"
                 logger.info(f"✅ Валидный телефон (Беларусь): {result}")
-                return True, result
+                return ValidationResult.ok(result)
             else:
                 logger.debug(f"Неизвестный оператор Беларуси: {operator}")
-                return False, "invalid"
+                return ValidationResult.fail("Неверный формат номера телефона")
         else:
             logger.debug(f"Неверная длина для Беларуси: {len(digits)}")
-            return False, "invalid"
+            return ValidationResult.fail("Неверный формат номера телефона")
     
     # === РОССИЯ (+7 / 8) ===
     # Форматы:
@@ -87,14 +122,14 @@ def validate_phone(phone: str) -> tuple[bool, str]:
         # Но также допускаем городские номера
         result = f"+{digits}"
         logger.info(f"✅ Валидный телефон (Россия): {result}")
-        return True, result
+        return ValidationResult.ok(result)
     
     # Если ничего не подошло
     logger.debug(f"Телефон не прошёл валидацию: {phone} -> {digits}")
-    return False, "invalid"
+    return ValidationResult.fail("Неверный формат номера телефона")
 
 
-def validate_email(email: str) -> tuple[bool, str]:
+def validate_email(email: str) -> ValidationResult:
     """
     Валидация email адреса.
     
@@ -112,7 +147,7 @@ def validate_email(email: str) -> tuple[bool, str]:
     """
     if not email:
         logger.debug("Email пустой")
-        return False, "invalid"
+        return ValidationResult.fail("Email пустой")
     
     # Нормализуем
     email = email.strip().lower()
@@ -123,25 +158,25 @@ def validate_email(email: str) -> tuple[bool, str]:
     
     if not re.match(pattern, email):
         logger.debug(f"Email не прошёл regex: {email}")
-        return False, "invalid"
+        return ValidationResult.fail("Неверный формат email")
     
     # Дополнительные проверки
     local_part, domain = email.rsplit("@", 1)
     
     # Локальная часть не должна быть пустой
     if not local_part:
-        return False, "invalid"
+        return ValidationResult.fail("Неверный формат email")
         
     # Домен должен содержать точку
     if "." not in domain:
-        return False, "invalid"
+        return ValidationResult.fail("Неверный формат email")
         
     # Домен не должен начинаться или заканчиваться точкой
     if domain.startswith(".") or domain.endswith("."):
-        return False, "invalid"
+        return ValidationResult.fail("Неверный формат email")
     
     logger.info(f"✅ Валидный email: {email}")
-    return True, email
+    return ValidationResult.ok(email)
 
 
 # =============================================================================
@@ -169,9 +204,9 @@ if __name__ == "__main__":
     print("ТЕСТЫ ТЕЛЕФОНОВ")
     print("=" * 50)
     for phone in test_phones:
-        ok, result = validate_phone(phone)
-        status = "✅" if ok else "❌"
-        print(f"{status} '{phone}' -> {result}")
+        res = validate_phone(phone)
+        status = "✅" if res.is_valid else "❌"
+        print(f"{status} '{phone}' -> {res.normalized_value or res.error}")
     
     # Тесты email
     test_emails = [
@@ -188,6 +223,6 @@ if __name__ == "__main__":
     print("ТЕСТЫ EMAIL")
     print("=" * 50)
     for email in test_emails:
-        ok, result = validate_email(email)
-        status = "✅" if ok else "❌"
-        print(f"{status} '{email}' -> {result}")
+        res = validate_email(email)
+        status = "✅" if res.is_valid else "❌"
+        print(f"{status} '{email}' -> {res.normalized_value or res.error}")
