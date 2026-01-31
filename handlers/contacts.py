@@ -1,21 +1,21 @@
 from aiogram import Router
 from aiogram.types import Message
-from aiogram.exceptions import SkipHandler
 import time
 
 from database import get_user, update_user
 from utils.validation import validate_phone, validate_email
 from utils.notifications import notify_admin, build_lead_workshop
+from utils.db_filters import DBStateFilter
 from texts import MESSAGES, WEAPON_LABELS
 
 router = Router()
 
 
-@router.message()
+@router.message(DBStateFilter("wait_phone", "wait_email"))
 async def contacts_flow(message: Message):
     user = await get_user(message.from_user.id)
     if not user:
-        raise SkipHandler
+        return
 
     state = user.get("state")
 
@@ -51,5 +51,3 @@ async def contacts_flow(message: Message):
 
         await message.answer(MESSAGES["final"])
         return
-
-    raise SkipHandler

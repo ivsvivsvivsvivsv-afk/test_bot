@@ -1,6 +1,5 @@
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, Message
-from aiogram.exceptions import SkipHandler
 
 from database import get_user, update_user
 from keyboards.inline import (
@@ -9,6 +8,7 @@ from keyboards.inline import (
 from texts import MESSAGES, ROUND_NAMES
 from utils.statements import get_statement_for_round
 from utils.notifications import notify_admin, build_prize_candidate
+from utils.db_filters import DBStateFilter
 
 router = Router()
 
@@ -35,11 +35,11 @@ async def weapon_selected(cb: CallbackQuery):
     await _send_round_intro(cb, round_num=1)
 
 
-@router.message()
+@router.message(DBStateFilter("weapon_other_ask"))
 async def weapon_other_text(message: Message):
     user = await get_user(message.from_user.id)
     if not user or user.get("state") != "weapon_other_ask":
-        raise SkipHandler
+        return
 
     other = (message.text or "").strip()
     await update_user(message.from_user.id, weapon="other", other_sphere=other)

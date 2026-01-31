@@ -1,12 +1,12 @@
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, Message
-from aiogram.exceptions import SkipHandler
 from datetime import datetime
 
 from database import get_user, update_user
 from texts import MESSAGES
 from utils.validation import validate_phone, validate_email
 from utils.notifications import notify_admin, build_lead_arena
+from utils.db_filters import DBStateFilter
 
 router = Router()
 
@@ -19,11 +19,11 @@ async def arena_signup(cb: CallbackQuery):
     await cb.answer()
 
 
-@router.message()
+@router.message(DBStateFilter("arena_wait_phone", "arena_wait_email"))
 async def arena_flow(message: Message):
     user = await get_user(message.from_user.id)
     if not user:
-        raise SkipHandler
+        return
 
     if user.get("state") == "arena_wait_phone":
         ok, phone = validate_phone(message.text or "")
@@ -48,5 +48,3 @@ async def arena_flow(message: Message):
 
         await message.answer(MESSAGES["arena_complete"])
         return
-
-    raise SkipHandler
