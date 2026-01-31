@@ -1,285 +1,305 @@
 import os
 import json
-from pathlib import Path
-from typing import Optional, Tuple, List
-
 import aiosqlite
+from datetime import datetime
 from aiogram import Router, F
-from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
+from aiogram.filters import Command, CommandObject
 
 router = Router()
 
-# Interactive state: admin_id -> pending key
-_PENDING_KEY: dict[int, str] = {}
+# --- Config ---
+DEFAULT_DB_PATH = "/data/bot.db"  # matches your logs: Database path: /data/bot.db
+
+# Keys registry (optional): if images.json exists, we use its keys to prevent typos.
+DEFAULT_KEYS = [
+    "img_start_portal",
+    "img_class_choice",
+    "img_weapon_choice",
+    "img_weapon_other_ask",
+    "img_round_1_intro",
+    "img_round_1_intro_marketing",
+    "img_round_1_intro_analytics",
+    "img_round_1_intro_copywriting",
+    "img_round_1_intro_design",
+    "img_round_1_intro_management",
+    "img_round_1_intro_video",
+    "img_round_1_intro_other",
+    "img_round_2_intro",
+    "img_round_3_intro",
+    "img_answer_prompt",
+    "img_result_correct",
+    "img_result_wrong",
+    "img_moral",
+    "img_workshop_ask_phone",
+    "img_workshop_ask_email",
+    "img_workshop_final",
+    "img_arena_intro",
+    "img_arena_ask_phone",
+    "img_arena_complete",
+]
+
+# When you run inside Amvera, /app is your code dir; images.json may exist there from repo.
+IMAGES_KEYS_JSON = os.getenv("IMAGES_KEYS_JSON", "/app/images.json")
+
+_pending_key: dict[int, str] = {}  # admin_id -> key
 
 
-def _parse_admin_ids_from_env() -> List[int]:
-    raw = os.getenv("ADMIN_IDS", "")
-    ids: List[int] = []
+def _parse_admin_ids() -> set[int]:
+    raw = os.getenv("ADMIN_IDS", "").strip()
+    if not raw:
+        return set()
+    out = set()
     for part in raw.split(","):
         part = part.strip()
         if part.isdigit():
-            ids.append(int(part))
-    return ids
+            out.add(int(part))
+    return out
 
 
 def _is_admin(user_id: int) -> bool:
-    # 1) ENV
-    env_ids = _parse_admin_ids_from_env()
-    if env_ids:
-        return user_id in env_ids
+    admin_ids = _parse_admin_ids()
+    return (user_id in admin_ids) if admin_ids else False
 
-    # 2) config.py fallback
+
+def _get_db_path() -> str:
+    # Prefer DB_PATH if you have it in env, otherwise default to /data/bot.db
+    return os.getenv("DB_PATH", DEFAULT_DB_PATH)
+
+
+def _load_allowed_keys() -> list[str]:
+    # If images.json exists in repo, use its keys as registry (values are ignored).
     try:
-        import config  # type: ignore
-        cfg_ids = getattr(config, "ADMIN_IDS", None)
-        if isinstance(cfg_ids, (list, tuple, set)):
-            return user_id in set(int(x) for x in cfg_ids)
+        if os.path.exists(IMAGES_KEYS_JSON):
+            with open(IMAGES_KEYS_JSON, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and data:
+                return sorted(list(data.keys()))
     except Exception:
         pass
-
-    return False
-
-
-def _allowed_keys() -> List[str]:
-    """Allowed keys are taken from images.json if present; otherwise returns a sensible default set."""
-    # Try to read keys from repo file (optional, just to prevent typos)
-    for p in (Path("/app/images.json"), Path("images.json")):
-        try:
-            if p.exists():
-                data = json.loads(p.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    keys = [k for k in data.keys() if isinstance(k, str) and k.strip()]
-                    keys.sort()
-                    if keys:
-                        return keys
-        except Exception:
-            continue
-
-    # fallback minimal set
-    return sorted([
-        "img_start_portal",
-        "img_class_choice",
-        "img_weapon_choice",
-        "img_weapon_other_ask",
-        "img_round_1_intro",
-        "img_round_1_intro_marketing",
-        "img_round_1_intro_analytics",
-        "img_round_1_intro_copywriting",
-        "img_round_1_intro_design",
-        "img_round_1_intro_management",
-        "img_round_1_intro_video",
-        "img_round_1_intro_other",
-        "img_round_2_intro",
-        "img_round_3_intro",
-        "img_answer_prompt",
-        "img_result_correct",
-        "img_result_wrong",
-        "img_moral",
-        "img_workshop_ask_phone",
-        "img_workshop_ask_email",
-        "img_workshop_final",
-        "img_arena_intro",
-        "img_arena_ask_phone",
-        "img_arena_complete",
-    ])
+    return sorted(DEFAULT_KEYS)
 
 
-def _db_path() -> str:
-    """Pick the same DB path your bot uses (Amvera persists /data)."""
-    # Explicit env
-    for var in ("DB_PATH", "DATABASE_PATH"):
-        v = os.getenv(var)
-        if v:
-            return v
-
-    # Try database module constants
-    try:
-        import database  # type: ignore
-        for attr in ("DB_PATH", "DATABASE_PATH"):
-            if hasattr(database, attr):
-                val = getattr(database, attr)
-                return str(val)
-    except Exception:
-        pass
-
-    # Default (matches your earlier logs)
-    return "/data/bot.db"
-
-
-def _images_table_sql() -> str:
-    return (
-        "CREATE TABLE IF NOT EXISTS images ("
-        "key TEXT PRIMARY KEY,"
-        "kind TEXT NOT NULL,"
-        "file_id TEXT NOT NULL,"
-        "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
-        ");"
-    )
-
-
-def _normalize_kind(kind: str) -> str:
-    kind = (kind or "photo").strip().lower()
-    if kind in ("doc", "document"):
-        return "doc"
-    return "photo"
-
-
-async def _ensure_images_table(db: aiosqlite.Connection) -> None:
-    await db.execute(_images_table_sql())
-
-
-async def set_image(key: str, kind: str, file_id: str) -> None:
-    key = (key or "").strip()
-    file_id = (file_id or "").strip()
-    if not key or not file_id:
-        return
-    kind = _normalize_kind(kind)
-
-    async with aiosqlite.connect(_db_path()) as db:
-        await _ensure_images_table(db)
+async def _ensure_table(db_path: str) -> None:
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    async with aiosqlite.connect(db_path) as db:
         await db.execute(
             """
-            INSERT INTO images(key, kind, file_id, updated_at)
-            VALUES(?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(key) DO UPDATE SET
-              kind=excluded.kind,
-              file_id=excluded.file_id,
-              updated_at=CURRENT_TIMESTAMP
-            """,
-            (key, kind, file_id),
+            CREATE TABLE IF NOT EXISTS images (
+              key TEXT PRIMARY KEY,
+              kind TEXT NOT NULL,
+              file_id TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            )
+            """
         )
         await db.commit()
 
 
-async def get_image(key: str) -> Optional[Tuple[str, str]]:
-    key = (key or "").strip()
-    if not key:
-        return None
-    async with aiosqlite.connect(_db_path()) as db:
-        await _ensure_images_table(db)
-        cur = await db.execute("SELECT kind, file_id FROM images WHERE key = ?", (key,))
-        row = await cur.fetchone()
-        return (row[0], row[1]) if row else None
-
-
-async def delete_image(key: str) -> None:
-    key = (key or "").strip()
-    if not key:
-        return
-    async with aiosqlite.connect(_db_path()) as db:
-        await _ensure_images_table(db)
-        await db.execute("DELETE FROM images WHERE key = ?", (key,))
+async def _set_image(db_path: str, key: str, kind: str, file_id: str) -> None:
+    await _ensure_table(db_path)
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """
+            INSERT INTO images(key, kind, file_id, updated_at)
+            VALUES(?,?,?,?)
+            ON CONFLICT(key) DO UPDATE SET
+              kind=excluded.kind,
+              file_id=excluded.file_id,
+              updated_at=excluded.updated_at
+            """,
+            (key, kind, file_id, datetime.utcnow().isoformat()),
+        )
         await db.commit()
 
 
-async def list_saved_keys() -> List[str]:
-    async with aiosqlite.connect(_db_path()) as db:
-        await _ensure_images_table(db)
-        cur = await db.execute("SELECT key FROM images ORDER BY key")
-        rows = await cur.fetchall()
-        return [r[0] for r in rows]
+async def _get_image(db_path: str, key: str):
+    await _ensure_table(db_path)
+    async with aiosqlite.connect(db_path) as db:
+        async with db.execute("SELECT kind, file_id, updated_at FROM images WHERE key=?", (key,)) as cur:
+            row = await cur.fetchone()
+            return row  # None or (kind, file_id, updated_at)
 
 
-async def _deny(msg: Message) -> None:
-    await msg.answer(
-        "⛔️ Доступ только админу.\n"
-        f"Твой Telegram ID: {msg.from_user.id}\n"
-        "Добавь его в ADMIN_IDS и перезапусти сервис."
-    )
+async def _del_image(db_path: str, key: str) -> bool:
+    await _ensure_table(db_path)
+    async with aiosqlite.connect(db_path) as db:
+        cur = await db.execute("DELETE FROM images WHERE key=?", (key,))
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def _list_saved_keys(db_path: str) -> list[str]:
+    await _ensure_table(db_path)
+    async with aiosqlite.connect(db_path) as db:
+        async with db.execute("SELECT key FROM images ORDER BY key") as cur:
+            rows = await cur.fetchall()
+            return [r[0] for r in rows]
+
+
+async def _send_image(msg: Message, kind: str, file_id: str) -> None:
+    if kind == "document":
+        await msg.answer_document(file_id)
+    else:
+        await msg.answer_photo(file_id)
 
 
 @router.message(Command("imgwhere"))
 async def imgwhere(msg: Message):
     if not _is_admin(msg.from_user.id):
-        return await _deny(msg)
-    p = _db_path()
-    await msg.answer(f"DB path: {p}")
+        await msg.answer(
+            f"⛔️ Доступ только админу.\n"
+            f"Твой ID: {msg.from_user.id}\n"
+            f"Добавь его в ADMIN_IDS (через запятую) и задеплой."
+        )
+        return
+    db_path = _get_db_path()
+    await msg.answer(
+        f"DB_PATH: {db_path}\n"
+        f"Exists: {os.path.exists(db_path)}\n"
+        f"Keys registry: {IMAGES_KEYS_JSON} (exists={os.path.exists(IMAGES_KEYS_JSON)})"
+    )
 
 
 @router.message(Command("imgkeys"))
 async def imgkeys(msg: Message):
     if not _is_admin(msg.from_user.id):
-        return await _deny(msg)
+        await msg.answer(
+            f"⛔️ Доступ только админу.\n"
+            f"Твой ID: {msg.from_user.id}\n"
+            f"Добавь его в ADMIN_IDS (через запятую) и задеплой."
+        )
+        return
+    keys = _load_allowed_keys()
+    await msg.answer("Ключи:\n" + "\n".join(keys))
 
-    keys = _allowed_keys()
-    saved = set(await list_saved_keys())
 
-    lines = []
-    for k in keys:
-        lines.append(f"✅ {k}" if k in saved else f"— {k}")
-
-    await msg.answer("Ключи (✅ = уже сохранено):\n" + "\n".join(lines))
+@router.message(Command("imgkeys_saved"))
+async def imgkeys_saved(msg: Message):
+    if not _is_admin(msg.from_user.id):
+        await msg.answer(
+            f"⛔️ Доступ только админу.\n"
+            f"Твой ID: {msg.from_user.id}\n"
+            f"Добавь его в ADMIN_IDS (через запятую) и задеплой."
+        )
+        return
+    db_path = _get_db_path()
+    keys = await _list_saved_keys(db_path)
+    await msg.answer("Сохранённые ключи:\n" + ("\n".join(keys) if keys else "(пусто)"))
 
 
 @router.message(Command("imgset"))
 async def imgset(msg: Message, command: CommandObject):
     if not _is_admin(msg.from_user.id):
-        return await _deny(msg)
+        await msg.answer(
+            f"⛔️ Доступ только админу.\n"
+            f"Твой ID: {msg.from_user.id}\n"
+            f"Добавь его в ADMIN_IDS (через запятую) и задеплой."
+        )
+        return
     if not command.args:
-        return await msg.answer("Используй: /imgset <key>\nПример: /imgset img_start_portal")
+        await msg.answer("Используй: /imgset <key>\nПример: /imgset img_start_portal")
+        return
 
     key = command.args.strip()
-    if key not in _allowed_keys():
-        return await msg.answer(f"Нет такого ключа: {key}\nПроверь /imgkeys")
+    allowed = set(_load_allowed_keys())
+    if key not in allowed:
+        await msg.answer(f"Нет такого ключа: {key}\nСмотри список: /imgkeys")
+        return
 
-    _PENDING_KEY[msg.from_user.id] = key
-    await msg.answer(f"Ок. Теперь отправь фото для ключа: {key}")
+    _pending_key[msg.from_user.id] = key
+    await msg.answer(f"Ок. Теперь отправь фото для ключа:\n{key}")
 
 
 @router.message(F.photo)
 async def on_photo(msg: Message):
     if not _is_admin(msg.from_user.id):
         return
-    key = _PENDING_KEY.get(msg.from_user.id)
+    key = _pending_key.get(msg.from_user.id)
     if not key:
         return
 
     file_id = msg.photo[-1].file_id
-    await set_image(key, "photo", file_id)
-    _PENDING_KEY.pop(msg.from_user.id, None)
-    await msg.answer(f"✅ Сохранено\n{key} = {file_id}")
+    db_path = _get_db_path()
+    await _set_image(db_path, key, "photo", file_id)
+    _pending_key.pop(msg.from_user.id, None)
+    await msg.answer(f"✅ Сохранено\n{key} = {file_id}\n(в БД: {db_path})")
+
+
+@router.message(F.document)
+async def on_document(msg: Message):
+    if not _is_admin(msg.from_user.id):
+        return
+    key = _pending_key.get(msg.from_user.id)
+    if not key:
+        return
+
+    # for images sent as document (no compression)
+    file_id = msg.document.file_id
+    db_path = _get_db_path()
+    await _set_image(db_path, key, "document", file_id)
+    _pending_key.pop(msg.from_user.id, None)
+    await msg.answer(f"✅ Сохранено\n{key} = {file_id}\n(в БД: {db_path})")
 
 
 @router.message(Command("imgget"))
 async def imgget(msg: Message, command: CommandObject):
     if not _is_admin(msg.from_user.id):
-        return await _deny(msg)
+        await msg.answer(
+            f"⛔️ Доступ только админу.\n"
+            f"Твой ID: {msg.from_user.id}\n"
+            f"Добавь его в ADMIN_IDS (через запятую) и задеплой."
+        )
+        return
     if not command.args:
-        return await msg.answer("Используй: /imgget <key>")
-
+        await msg.answer("Используй: /imgget <key>")
+        return
     key = command.args.strip()
-    row = await get_image(key)
-    await msg.answer(f"{key} = {row}")
+    db_path = _get_db_path()
+    row = await _get_image(db_path, key)
+    if not row:
+        await msg.answer(f"{key}: (нет)")
+        return
+    kind, file_id, updated_at = row
+    await msg.answer(f"{key}: {kind} {file_id}\nupdated_at: {updated_at}")
 
 
 @router.message(Command("imgdel"))
 async def imgdel(msg: Message, command: CommandObject):
     if not _is_admin(msg.from_user.id):
-        return await _deny(msg)
+        await msg.answer(
+            f"⛔️ Доступ только админу.\n"
+            f"Твой ID: {msg.from_user.id}\n"
+            f"Добавь его в ADMIN_IDS (через запятую) и задеплой."
+        )
+        return
     if not command.args:
-        return await msg.answer("Используй: /imgdel <key>")
-
+        await msg.answer("Используй: /imgdel <key>")
+        return
     key = command.args.strip()
-    await delete_image(key)
-    await msg.answer(f"🗑️ Удалено: {key}")
+    db_path = _get_db_path()
+    ok = await _del_image(db_path, key)
+    await msg.answer("🗑️ Очищено" if ok else "Ключа не было")
 
 
 @router.message(Command("imgtest"))
 async def imgtest(msg: Message, command: CommandObject):
     if not _is_admin(msg.from_user.id):
-        return await _deny(msg)
+        await msg.answer(
+            f"⛔️ Доступ только админу.\n"
+            f"Твой ID: {msg.from_user.id}\n"
+            f"Добавь его в ADMIN_IDS (через запятую) и задеплой."
+        )
+        return
     if not command.args:
-        return await msg.answer("Используй: /imgtest <key>")
-
+        await msg.answer("Используй: /imgtest <key>")
+        return
     key = command.args.strip()
-    row = await get_image(key)
+    db_path = _get_db_path()
+    row = await _get_image(db_path, key)
     if not row:
-        return await msg.answer(f"Нет изображения для ключа: {key}")
-
-    kind, file_id = row
-    if kind == "doc":
-        await msg.answer_document(file_id)
-    else:
-        await msg.answer_photo(file_id)
+        await msg.answer(f"{key}: (нет в БД)")
+        return
+    kind, file_id, _ = row
+    await msg.answer(f"Отправляю {key}…")
+    await _send_image(msg, kind, file_id)
