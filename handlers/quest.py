@@ -26,7 +26,8 @@ async def weapon_selected(cb: CallbackQuery):
 
     if weapon == "other":
         await update_user(cb.from_user.id, weapon="other", state="weapon_other_ask")
-        await cb.message.edit_text(MESSAGES["weapon_other_ask"])
+        # Не убираем клавиатуру с выбором оружия: пользователь может передумать и выбрать другой вариант.
+        await cb.message.edit_text(MESSAGES["weapon_other_ask"], reply_markup=cb.message.reply_markup)
         await cb.answer()
         return
 

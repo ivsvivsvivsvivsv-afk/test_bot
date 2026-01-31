@@ -13,7 +13,8 @@ router = Router()
 @router.callback_query(F.data == "arena_signup")
 async def arena_signup(cb: CallbackQuery):
     await update_user(cb.from_user.id, state="arena_wait_phone")
-    await cb.message.edit_text(MESSAGES["arena_intro"])
+    # Не убираем клавиатуру при edit_text, иначе кнопки "пропадают" после первого нажатия.
+    await cb.message.edit_text(MESSAGES["arena_intro"], reply_markup=cb.message.reply_markup)
     await cb.message.answer(MESSAGES["ask_phone"])
     await cb.answer()
 
