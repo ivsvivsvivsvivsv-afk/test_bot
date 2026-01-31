@@ -68,3 +68,17 @@ def kb_want_workshop() -> InlineKeyboardMarkup:
     b.adjust(1)
     return b.as_markup()
 
+def kb_open_generator() -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text=BUTTONS["open_generator"], callback_data="open_generator")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def kb_go_to_quest() -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    # reuse existing start_quest handler
+    b.button(text=BUTTONS.get("go_to_quest", BUTTONS["start_quest"]), callback_data="start_quest")
+    b.adjust(1)
+    return b.as_markup()
+
