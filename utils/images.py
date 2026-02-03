@@ -89,6 +89,37 @@ async def send_image_if_exists(target: Any, key: Union[str, Iterable[str]]) -> b
     return await _send_single(target, str(key))
 
 
+async def send_photo_with_caption(
+    target: Any,
+    key: Union[str, Iterable[str]],
+    caption: str,
+    reply_markup: Any = None
+) -> bool:
+    """
+    Send photo with caption and optional reply_markup.
+    Returns True if photo was sent, False otherwise.
+    If no photo found, returns False (caller should send text message instead).
+    """
+    t = _unwrap_target(target)
+    
+    # Handle list of keys (fallbacks)
+    keys_to_try = [key] if isinstance(key, str) else list(key)
+    
+    for k in keys_to_try:
+        if not k:
+            continue
+        rec = await get_image(str(k))
+        if rec:
+            kind, file_id = rec
+            if kind == "document":
+                await t.answer_document(file_id, caption=caption, reply_markup=reply_markup)
+            else:
+                await t.answer_photo(file_id, caption=caption, reply_markup=reply_markup)
+            return True
+    
+    return False
+
+
 def resolve_round_intro_image_key(weapon: Optional[str], round_num: int) -> str:
     """
     Key resolver used by quest flow:
