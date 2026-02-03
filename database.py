@@ -65,6 +65,7 @@ async def init_db():
         await add_col("ALTER TABLE users ADD COLUMN workshop_registered INTEGER DEFAULT 0", "workshop_registered")
         await add_col("ALTER TABLE users ADD COLUMN arena_registered INTEGER DEFAULT 0", "arena_registered")
         await add_col("ALTER TABLE users ADD COLUMN quest_started_at INTEGER", "quest_started_at")
+        await add_col("ALTER TABLE users ADD COLUMN last_image_msg_id INTEGER", "last_image_msg_id")
 
         await db.commit()
 
