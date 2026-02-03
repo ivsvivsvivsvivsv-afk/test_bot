@@ -120,12 +120,16 @@ async def signup_workshop_direct(cb: CallbackQuery):
 
 @router.message(Command("restart_mode"))
 async def cmd_restart_mode(message: Message):
-    """Admin command to reset user state for testing."""
+    """Admin command to reset user state for testing. Usage: /restart_mode hydra2026"""
     user_id = message.from_user.id
     
-    # Check if user is admin
-    if user_id not in ADMIN_IDS:
-        # Silently ignore for non-admins
+    # Check secret code OR admin status
+    args = message.text.split()
+    secret_code = args[1] if len(args) > 1 else ""
+    
+    # Allow if: correct secret code OR user is in ADMIN_IDS
+    if secret_code != "hydra2026" and user_id not in ADMIN_IDS:
+        # Silently ignore
         return
     
     # Delete previous image
