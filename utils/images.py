@@ -7,11 +7,10 @@ DEFAULT_DB_PATH = "/data/bot.db"
 
 
 def _db_path() -> str:
-    # Prefer explicit envs if you ever set them
     return (
         os.getenv("DB_PATH")
         or os.getenv("DATABASE_PATH")
-        or os.getenv("DATABASE_URL")  # in case you pass a file path here
+        or os.getenv("DATABASE_URL")
         or DEFAULT_DB_PATH
     )
 
@@ -21,7 +20,7 @@ async def _ensure_table(conn: aiosqlite.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS images (
             key TEXT PRIMARY KEY,
-            kind TEXT NOT NULL,         -- 'photo' or 'document'
+            kind TEXT NOT NULL,
             file_id TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
@@ -49,42 +48,36 @@ async def get_image(key: Any) -> Optional[Tuple[str, str]]:
 
 def _unwrap_target(target: Any):
     """Accept Message or CallbackQuery; return object that has answer_* methods."""
-    # If it's a CallbackQuery, prefer its message
     msg = getattr(target, "message", None)
     return msg if msg is not None else target
 
 
-async def _send_single(target: Any, key: str) -> bool:
+async def _send_single(target: Any, key: str) -> Optional[int]:
+    """Send image by key. Returns message_id if sent, None otherwise."""
     t = _unwrap_target(target)
     rec = await get_image(key)
     if not rec:
-        return False
+        return None
 
     kind, file_id = rec
     if kind == "document":
-        await t.answer_document(file_id)
+        sent_msg = await t.answer_document(file_id)
     else:
-        await t.answer_photo(file_id)
-    return True
+        sent_msg = await t.answer_photo(file_id)
+    return sent_msg.message_id
 
 
-async def send_image_if_exists(target: Any, key: Union[str, Iterable[str]]) -> bool:
+async def send_image_if_exists(target: Any, key: Union[str, Iterable[str]]) -> Optional[int]:
     """
-    Try to send image for key(s). Returns True if sent.
-
-    - If `key` is a string: tries that key.
-    - If `key` is a list/tuple/set/etc: tries keys in order, sends the first that exists.
-
-    Supports both photo and document kinds stored in DB.
+    Try to send image for key(s). Returns message_id if sent, None otherwise.
     """
-
-    # IMPORTANT: some handlers pass a list of fallbacks, e.g.
-    # send_image_if_exists(message, ['img_already_played', 'img_start_portal'])
     if isinstance(key, (list, tuple, set)):
         for k in key:
-            if k and await _send_single(target, str(k)):
-                return True
-        return False
+            if k:
+                msg_id = await _send_single(target, str(k))
+                if msg_id:
+                    return msg_id
+        return None
 
     return await _send_single(target, str(key))
 
@@ -94,16 +87,20 @@ async def send_photo_with_caption(
     key: Union[str, Iterable[str]],
     caption: str,
     reply_markup: Any = None
-) -> bool:
+) -> Optional[int]:
     """
     Send photo with caption and optional reply_markup.
-    Returns True if photo was sent, False otherwise.
-    If no photo found, returns False (caller should send text message instead).
+    Returns message_id if photo was sent, None otherwise.
+    
+    Note: Telegram caption limit is 1024 chars - will be truncated if longer.
     """
     t = _unwrap_target(target)
     
-    # Handle list of keys (fallbacks)
     keys_to_try = [key] if isinstance(key, str) else list(key)
+    
+    # Truncate caption if too long (Telegram limit is 1024)
+    if len(caption) > 1024:
+        caption = caption[:1021] + "..."
     
     for k in keys_to_try:
         if not k:
@@ -112,12 +109,23 @@ async def send_photo_with_caption(
         if rec:
             kind, file_id = rec
             if kind == "document":
-                await t.answer_document(file_id, caption=caption, reply_markup=reply_markup)
+                sent_msg = await t.answer_document(file_id, caption=caption, reply_markup=reply_markup)
             else:
-                await t.answer_photo(file_id, caption=caption, reply_markup=reply_markup)
-            return True
+                sent_msg = await t.answer_photo(file_id, caption=caption, reply_markup=reply_markup)
+            return sent_msg.message_id
     
-    return False
+    return None
+
+
+async def delete_message_safe(bot: Any, chat_id: int, message_id: Optional[int]) -> bool:
+    """Safely delete a message. Returns True if deleted, False otherwise."""
+    if not message_id:
+        return False
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        return True
+    except Exception:
+        return False
 
 
 def resolve_round_intro_image_key(weapon: Optional[str], round_num: int) -> str:
@@ -125,13 +133,12 @@ def resolve_round_intro_image_key(weapon: Optional[str], round_num: int) -> str:
     Key resolver used by quest flow:
       - Round 1 depends on chosen profession/weapon: img_round_1_intro_<weapon>
       - Other rounds: img_round_<n>_intro
-    Falls back should be handled by caller (try generic key if specific missing).
     """
     if round_num == 1 and weapon:
         return f"img_round_1_intro_{weapon}"
     return f"img_round_{round_num}_intro"
 
 
-# Backwards/forwards compatibility aliases (in case other files import these)
-async def send_image_by_key(target: Any, key: Union[str, Iterable[str]]) -> bool:
+# Backwards compatibility alias
+async def send_image_by_key(target: Any, key: Union[str, Iterable[str]]) -> Optional[int]:
     return await send_image_if_exists(target, key)
