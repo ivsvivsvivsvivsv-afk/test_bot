@@ -8,7 +8,7 @@ from keyboards.inline import (
 from texts import MESSAGES, ROUND_NAMES
 from utils.statements import get_statement_for_round
 from utils.notifications import notify_admin, build_prize_candidate
-from utils.images import resolve_round_intro_image_key, send_image_if_exists
+from utils.images import resolve_round_intro_image_key, send_image_if_exists, send_photo_with_caption
 from utils.db_filters import DBStateFilter
 
 router = Router()
@@ -18,7 +18,23 @@ router = Router()
 async def class_selected(cb: CallbackQuery):
     player_class = "businessman" if cb.data == "class_boss" else "freelancer"
     await update_user(cb.from_user.id, player_class=player_class, state="weapon")
-    await cb.message.edit_text(MESSAGES["weapon_choice"], reply_markup=kb_weapon())
+    
+    # Delete old message (may be photo with caption)
+    try:
+        await cb.message.delete()
+    except Exception:
+        pass
+    
+    # Try to send photo with caption for weapon choice
+    photo_sent = await send_photo_with_caption(
+        cb.message, ['img_weapon_choice'], 
+        caption=MESSAGES["weapon_choice"], 
+        reply_markup=kb_weapon()
+    )
+    
+    if not photo_sent:
+        await cb.message.answer(MESSAGES["weapon_choice"], reply_markup=kb_weapon())
+    
     await cb.answer()
 
 
@@ -28,7 +44,23 @@ async def weapon_selected(cb: CallbackQuery):
 
     if weapon == "other":
         await update_user(cb.from_user.id, weapon="other", state="weapon_other_ask")
-        await cb.message.edit_text(MESSAGES["weapon_other_ask"], reply_markup=cb.message.reply_markup)
+        
+        # Delete old message (may be photo with caption)
+        try:
+            await cb.message.delete()
+        except Exception:
+            pass
+        
+        # Try to send photo with caption for "other" prompt
+        photo_sent = await send_photo_with_caption(
+            cb.message, ['img_weapon_other_ask'],
+            caption=MESSAGES["weapon_other_ask"],
+            reply_markup=None
+        )
+        
+        if not photo_sent:
+            await cb.message.answer(MESSAGES["weapon_other_ask"])
+        
         await cb.answer()
         return
 
@@ -70,21 +102,35 @@ async def _send_round_intro(target, round_num: int):
         wisdom_prompt=data["wisdom_prompt"],
     )
 
-    # optional: send round intro image (configured via images.json)
-    try:
-        candidates = resolve_round_intro_image_key(round_num, weapon)
-        if hasattr(target, "message"):
-            await send_image_if_exists(target.message, candidates)
-        else:
-            await send_image_if_exists(target, candidates)
-    except Exception:
-        pass
+    # Resolve image key (weapon first, then round_num!)
+    image_key = resolve_round_intro_image_key(weapon, round_num)
+    keyboard = kb_go_check()
 
+    # Determine message target
     if hasattr(target, "message"):  # CallbackQuery
-        await target.message.edit_text(text, reply_markup=kb_go_check())
-        await target.answer()
+        msg_target = target.message
+        # Delete old message to avoid stale content
+        try:
+            await target.message.delete()
+        except Exception:
+            pass
     else:  # Message
-        await target.answer(text, reply_markup=kb_go_check())
+        msg_target = target
+
+    # Try to send photo with caption, fallback to text only
+    photo_sent = await send_photo_with_caption(
+        msg_target, image_key, caption=text, reply_markup=keyboard
+    )
+    
+    if not photo_sent:
+        # No image found, send text message
+        await msg_target.answer(text, reply_markup=keyboard)
+
+    if hasattr(target, "answer"):
+        try:
+            await target.answer()
+        except Exception:
+            pass
 
 
 @router.callback_query(F.data == "go_check")
@@ -92,7 +138,14 @@ async def go_check(cb: CallbackQuery):
     user = await get_user(cb.from_user.id)
     rn = int(user.get("round_number") or 1)
     await update_user(cb.from_user.id, state=f"round_{rn}_answer")
-    await cb.message.edit_text(MESSAGES["answer_prompt"], reply_markup=kb_answer())
+    
+    # Delete old message (may be photo with caption)
+    try:
+        await cb.message.delete()
+    except Exception:
+        pass
+    
+    await cb.message.answer(MESSAGES["answer_prompt"], reply_markup=kb_answer())
     await cb.answer()
 
 

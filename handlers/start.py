@@ -5,7 +5,7 @@ from aiogram.types import Message, CallbackQuery
 from database import create_user, get_user, update_user
 from keyboards.inline import kb_start, kb_class
 from texts import MESSAGES, URLS
-from utils.images import send_image_if_exists
+from utils.images import send_image_if_exists, send_photo_with_caption
 
 router = Router()
 
@@ -18,13 +18,31 @@ async def cmd_start(message: Message):
         user = await get_user(message.from_user.id)
 
     if user and user.get("quest_completed"):
-        await send_image_if_exists(message, ['img_already_played', 'img_start_portal'])
-        await message.answer(MESSAGES["already_played"], reply_markup=kb_start())
+        # Already played - try to send photo with caption
+        text = MESSAGES["already_played"]
+        keyboard = kb_start()
+        
+        photo_sent = await send_photo_with_caption(
+            message, ['img_already_played', 'img_start_portal'], 
+            caption=text, reply_markup=keyboard
+        )
+        
+        if not photo_sent:
+            await message.answer(text, reply_markup=keyboard)
         return
 
     await update_user(message.from_user.id, state="start")
-    await send_image_if_exists(message, ['img_start_portal'])
-    await message.answer(MESSAGES["start"], reply_markup=kb_start())
+    
+    # Try to send photo with caption
+    text = MESSAGES["start"]
+    keyboard = kb_start()
+    
+    photo_sent = await send_photo_with_caption(
+        message, ['img_start_portal'], caption=text, reply_markup=keyboard
+    )
+    
+    if not photo_sent:
+        await message.answer(text, reply_markup=keyboard)
 
 
 @router.callback_query(F.data == "open_generator")
@@ -47,6 +65,22 @@ async def start_quest(cb: CallbackQuery):
         other_sphere=None,
         quest_started_at=int(time.time()),
     )
-    await send_image_if_exists(cb.message, ['img_class_choice'])
-    await cb.message.edit_text(MESSAGES["class_choice"], reply_markup=kb_class())
+    
+    # Delete old message to avoid stale content
+    try:
+        await cb.message.delete()
+    except Exception:
+        pass
+    
+    # Try to send photo with caption, fallback to text only
+    text = MESSAGES["class_choice"]
+    keyboard = kb_class()
+    
+    photo_sent = await send_photo_with_caption(
+        cb.message, ['img_class_choice'], caption=text, reply_markup=keyboard
+    )
+    
+    if not photo_sent:
+        await cb.message.answer(text, reply_markup=keyboard)
+    
     await cb.answer()
