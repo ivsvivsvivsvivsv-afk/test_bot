@@ -16,6 +16,7 @@ def kb_class() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.button(text=BUTTONS["class_boss"], callback_data="class_boss")
     b.button(text=BUTTONS["class_freelancer"], callback_data="class_freelancer")
+    b.button(text="⬅️ Назад", callback_data="back_to_start")
     b.adjust(1)
     return b.as_markup()
 
@@ -29,13 +30,15 @@ def kb_weapon() -> InlineKeyboardMarkup:
     b.button(text=BUTTONS["weapon_management"], callback_data="weapon_management")
     b.button(text=BUTTONS["weapon_video"], callback_data="weapon_video")
     b.button(text=BUTTONS["weapon_other"], callback_data="weapon_other")
-    b.adjust(2, 2, 2, 1)
+    b.button(text="⬅️ Назад", callback_data="back_to_class")
+    b.adjust(2, 2, 2, 1, 1)
     return b.as_markup()
 
 
 def kb_go_check() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.button(text=BUTTONS["go_check"], callback_data="go_check")
+    b.button(text="⬅️ Назад", callback_data="back_to_weapon")
     b.adjust(1)
     return b.as_markup()
 
@@ -44,6 +47,7 @@ def kb_answer() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.button(text=BUTTONS["answer_true"], callback_data="answer_true")
     b.button(text=BUTTONS["answer_false"], callback_data="answer_false")
+    b.button(text="⬅️ Назад к вопросу", callback_data="back_to_question")
     b.adjust(1)
     return b.as_markup()
 
