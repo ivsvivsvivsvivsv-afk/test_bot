@@ -82,3 +82,13 @@ def kb_go_to_quest() -> InlineKeyboardMarkup:
     b.adjust(1)
     return b.as_markup()
 
+
+def kb_already_played() -> InlineKeyboardMarkup:
+    """Keyboard for users who already completed the quest."""
+    b = InlineKeyboardBuilder()
+    b.button(text=BUTTONS.get("signup_workshop", "🚀 Записаться на воркшоп"), callback_data="signup_workshop_direct")
+    b.button(text=BUTTONS["open_generator"], callback_data="open_generator")
+    b.button(text=BUTTONS["arena_signup"], callback_data="arena_signup")
+    b.adjust(1)
+    return b.as_markup()
+
