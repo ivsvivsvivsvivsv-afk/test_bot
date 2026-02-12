@@ -1,304 +1,541 @@
+"""
+Обработчики квеста (выбор класса, оружия, раунды).
+
+Особенности:
+- FSM для управления состоянием
+- Последовательная отправка сообщений
+- Деактивация кнопок после нажатия
+- Сохранение прогресса в базу
+"""
+
+import logging
 from aiogram import Router, F
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from database import get_user, update_user
+from database import Database
+from texts import TEXTS
 from keyboards.inline import (
-    kb_weapon, kb_go_check, kb_answer, kb_next_round, kb_show_moral, kb_want_workshop
+    CallbackPrefixes,
+    remove_keyboard,
+    get_quest_continue_keyboard,
 )
-from texts import MESSAGES, ROUND_NAMES
-from utils.statements import get_statement_for_round
-from utils.notifications import notify_admin, build_prize_candidate
-from utils.images import resolve_round_intro_image_key, send_image_if_exists, delete_message_safe
-from utils.db_filters import DBStateFilter
+from utils.statements import (
+    get_statement_for_round,
+    get_statement_text_formatted,
+    get_wisdom_text,
+    Statement,
+)
+from utils.notifications import notify_quest_completed
 
-router = Router()
+logger = logging.getLogger(__name__)
 
-
-async def _delete_previous_image(bot, user_id: int, chat_id: int):
-    """Delete previously sent image message if exists."""
-    user = await get_user(user_id)
-    if user and user.get("last_image_msg_id"):
-        await delete_message_safe(bot, chat_id, user["last_image_msg_id"])
-        await update_user(user_id, last_image_msg_id=None)
+router = Router(name="quest")
 
 
-@router.callback_query(F.data.in_({"class_boss", "class_freelancer"}))
-async def class_selected(cb: CallbackQuery):
-    user_id = cb.from_user.id
-    chat_id = cb.message.chat.id
+# =============================================================================
+# FSM СОСТОЯНИЯ
+# =============================================================================
+
+class QuestStates(StatesGroup):
+    """Состояния квеста."""
+    selecting_class = State()
+    selecting_weapon = State()
+    playing_round = State()
+    viewing_result = State()
+
+
+# =============================================================================
+# КЛАССЫ И ОРУЖИЯ
+# =============================================================================
+
+HERO_CLASSES = {
+    "businessman": {
+        "name": "💼 Бизнесмен",
+        "emoji": "💼",
+        "description": "Строит империю с помощью ИИ"
+    },
+    "creator": {
+        "name": "🎨 Творец",
+        "emoji": "🎨",
+        "description": "Создает контент с помощью ИИ"
+    },
+    "analyst": {
+        "name": "📊 Аналитик",
+        "emoji": "📊",
+        "description": "Анализирует данные с помощью ИИ"
+    },
+    "manager": {
+        "name": "📋 Менеджер",
+        "emoji": "📋",
+        "description": "Управляет проектами с ИИ"
+    }
+}
+
+WEAPONS = {
+    "marketing": {
+        "name": "📈 Меч Маркетинга",
+        "emoji": "📈",
+        "description": "Продвижение и реклама"
+    },
+    "analytics": {
+        "name": "🔍 Линза Аналитики",
+        "emoji": "🔍",
+        "description": "Данные и аналитика"
+    },
+    "copywriting": {
+        "name": "✍️ Перо Копирайтинга",
+        "emoji": "✍️",
+        "description": "Тексты и контент"
+    },
+    "design": {
+        "name": "🎨 Кисть Дизайна",
+        "emoji": "🎨",
+        "description": "Визуальный контент"
+    },
+    "management": {
+        "name": "📋 Скрижаль Менеджмента",
+        "emoji": "📋",
+        "description": "Управление и процессы"
+    },
+    "video": {
+        "name": "🎬 Камера Видео",
+        "emoji": "🎬",
+        "description": "Видеоконтент"
+    }
+}
+
+
+# =============================================================================
+# КЛАВИАТУРЫ
+# =============================================================================
+
+def get_class_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура выбора класса."""
+    builder = InlineKeyboardBuilder()
     
-    player_class = "businessman" if cb.data == "class_boss" else "freelancer"
+    for class_id, class_info in HERO_CLASSES.items():
+        builder.row(
+            InlineKeyboardButton(
+                text=f"{class_info['emoji']} {class_info['name'].split()[1]}",
+                callback_data=f"{CallbackPrefixes.QUEST}:class:{class_id}"
+            )
+        )
     
-    # Delete previous image
-    await _delete_previous_image(cb.bot, user_id, chat_id)
+    return builder.as_markup()
+
+
+def get_weapon_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура выбора оружия."""
+    builder = InlineKeyboardBuilder()
     
-    # Delete the text message with button
-    try:
-        await cb.message.delete()
-    except Exception:
-        pass
+    for weapon_id, weapon_info in WEAPONS.items():
+        builder.row(
+            InlineKeyboardButton(
+                text=weapon_info['name'],
+                callback_data=f"{CallbackPrefixes.QUEST}:weapon:{weapon_id}"
+            )
+        )
     
-    await update_user(user_id, player_class=player_class, state="weapon")
+    return builder.as_markup()
+
+
+def get_answer_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура ответа на утверждение (Правда/Ложь)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="✅ Правда",
+            callback_data=f"{CallbackPrefixes.QUEST}:answer:true"
+        ),
+        InlineKeyboardButton(
+            text="❌ Ложь",
+            callback_data=f"{CallbackPrefixes.QUEST}:answer:false"
+        )
+    )
+    return builder.as_markup()
+
+
+def get_next_round_keyboard(is_last: bool = False) -> InlineKeyboardMarkup:
+    """Клавиатура перехода к следующему раунду."""
+    builder = InlineKeyboardBuilder()
     
-    # Send new image and save its message_id
-    img_msg_id = await send_image_if_exists(cb.message, ['img_weapon_choice'])
-    if img_msg_id:
-        await update_user(user_id, last_image_msg_id=img_msg_id)
+    if is_last:
+        builder.row(
+            InlineKeyboardButton(
+                text="🏆 Узнать результат",
+                callback_data=f"{CallbackPrefixes.QUEST}:show_result"
+            )
+        )
+    else:
+        builder.row(
+            InlineKeyboardButton(
+                text="➡️ Следующий раунд",
+                callback_data=f"{CallbackPrefixes.QUEST}:next_round"
+            )
+        )
     
-    # Send text with keyboard
-    await cb.message.answer(MESSAGES["weapon_choice"], reply_markup=kb_weapon())
-    await cb.answer()
+    return builder.as_markup()
 
 
-@router.callback_query(F.data.startswith("weapon_"))
-async def weapon_selected(cb: CallbackQuery):
-    user_id = cb.from_user.id
-    chat_id = cb.message.chat.id
-    weapon = cb.data.replace("weapon_", "").strip()
-
-    if weapon == "other":
-        # Delete previous image
-        await _delete_previous_image(cb.bot, user_id, chat_id)
-        
-        # Delete the text message with button
-        try:
-            await cb.message.delete()
-        except Exception:
-            pass
-        
-        await update_user(user_id, weapon="other", state="weapon_other_ask")
-        
-        # Send new image and save its message_id
-        img_msg_id = await send_image_if_exists(cb.message, ['img_weapon_other_ask'])
-        if img_msg_id:
-            await update_user(user_id, last_image_msg_id=img_msg_id)
-        
-        await cb.message.answer(MESSAGES["weapon_other_ask"])
-        await cb.answer()
-        return
-
-    await update_user(user_id, weapon=weapon)
-    await _send_round_intro(cb, round_num=1)
+def get_finish_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура после результатов."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="🎁 Получить подарок",
+            callback_data=f"{CallbackPrefixes.QUEST}:get_prize"
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="🔄 Пройти снова",
+            callback_data=f"{CallbackPrefixes.QUEST}:restart"
+        )
+    )
+    return builder.as_markup()
 
 
-@router.message(DBStateFilter("weapon_other_ask"))
-async def weapon_other_text(message: Message):
-    user = await get_user(message.from_user.id)
-    if not user or user.get("state") != "weapon_other_ask":
-        return
+# =============================================================================
+# ПОКАЗ ВЫБОРА КЛАССА
+# =============================================================================
 
-    other = (message.text or "").strip()
-    await update_user(message.from_user.id, weapon="other", other_sphere=other)
-    await _send_round_intro(message, round_num=1)
-
-
-async def _send_round_intro(target, round_num: int):
-    """Send round intro with image and text."""
-    # Determine user_id, chat_id, bot
-    if hasattr(target, "message"):  # CallbackQuery
-        user_id = target.from_user.id
-        chat_id = target.message.chat.id
-        bot = target.bot
-        msg_target = target.message
-        is_callback = True
-    else:  # Message
-        user_id = target.from_user.id
-        chat_id = target.chat.id
-        bot = target.bot
-        msg_target = target
-        is_callback = False
-
-    user = await get_user(user_id)
-    weapon = (user.get("weapon") or "other").strip()
-
-    data = get_statement_for_round(weapon, round_num)
-
-    # Delete previous image
-    await _delete_previous_image(bot, user_id, chat_id)
+async def show_class_selection(message: Message, state: FSMContext, db: Database):
+    """Показывает выбор класса героя."""
+    await state.set_state(QuestStates.selecting_class)
     
-    # Delete the text message with button (if callback)
-    if is_callback:
-        try:
-            await target.message.delete()
-        except Exception:
-            pass
-
-    await update_user(
-        user_id,
-        state=f"round_{round_num}_intro",
-        round_number=round_num,
-        current_statement=data["statement"],
-        current_is_truth=int(data["is_truth"]),
-        current_wisdom_prompt=data["wisdom_prompt"],
+    await message.answer(
+        TEXTS["select_class"],
+        parse_mode="HTML",
+        reply_markup=get_class_keyboard()
     )
 
-    round_name = ROUND_NAMES.get(str(round_num), str(round_num))
-    text = MESSAGES["round_intro"].format(
-        round_name=round_name,
-        statement=data["statement"],
-        wisdom_prompt=data["wisdom_prompt"],
+
+# =============================================================================
+# ВЫБОР КЛАССА
+# =============================================================================
+
+@router.callback_query(F.data.startswith(f"{CallbackPrefixes.QUEST}:class:"))
+async def cb_select_class(callback: CallbackQuery, state: FSMContext, db: Database):
+    """Обработка выбора класса."""
+    user_id = callback.from_user.id
+    class_id = callback.data.split(":")[-1]
+    
+    if class_id not in HERO_CLASSES:
+        await callback.answer("Неизвестный класс", show_alert=True)
+        return
+    
+    class_info = HERO_CLASSES[class_id]
+    logger.info(f"User {user_id} selected class: {class_id}")
+    
+    # Деактивируем кнопки
+    try:
+        await callback.message.edit_reply_markup(reply_markup=remove_keyboard())
+    except TelegramBadRequest as e:
+        logger.warning(f"Could not remove keyboard: {e}")
+    
+    await callback.answer(f"Вы выбрали: {class_info['name']}")
+    
+    # Сохраняем в FSM и базу
+    await state.update_data(hero_class=class_id)
+    await db.update_user_class(user_id, class_id)
+    
+    # Отправляем подтверждение и переходим к выбору оружия
+    await callback.message.answer(
+        f"⚔️ <b>Отлично! Вы — {class_info['name']}</b>\n\n"
+        f"{class_info['description']}\n\n"
+        "Теперь выберите своё оружие — специализацию в мире ИИ:",
+        parse_mode="HTML",
+        reply_markup=get_weapon_keyboard()
+    )
+    
+    await state.set_state(QuestStates.selecting_weapon)
+
+
+# =============================================================================
+# ВЫБОР ОРУЖИЯ
+# =============================================================================
+
+@router.callback_query(F.data.startswith(f"{CallbackPrefixes.QUEST}:weapon:"))
+async def cb_select_weapon(callback: CallbackQuery, state: FSMContext, db: Database):
+    """Обработка выбора оружия."""
+    user_id = callback.from_user.id
+    weapon_id = callback.data.split(":")[-1]
+    
+    if weapon_id not in WEAPONS:
+        await callback.answer("Неизвестное оружие", show_alert=True)
+        return
+    
+    weapon_info = WEAPONS[weapon_id]
+    logger.info(f"User {user_id} selected weapon: {weapon_id}")
+    
+    # Деактивируем кнопки
+    try:
+        await callback.message.edit_reply_markup(reply_markup=remove_keyboard())
+    except TelegramBadRequest as e:
+        logger.warning(f"Could not remove keyboard: {e}")
+    
+    await callback.answer(f"Вы выбрали: {weapon_info['name']}")
+    
+    # Сохраняем в FSM и базу
+    await state.update_data(weapon=weapon_id, current_round=1, score=0)
+    await db.update_user_weapon(user_id, weapon_id)
+    
+    # Отправляем подтверждение
+    await callback.message.answer(
+        f"🗡️ <b>Ваше оружие: {weapon_info['name']}</b>\n\n"
+        f"{weapon_info['description']}\n\n"
+        "Приготовьтесь! Сейчас начнётся испытание.\n"
+        "Вам нужно определить: правда или ложь перед вами.",
+        parse_mode="HTML"
+    )
+    
+    # Небольшая пауза и начинаем первый раунд
+    await start_round(callback.message, state, db, user_id, 1)
+
+
+# =============================================================================
+# ЗАПУСК РАУНДА
+# =============================================================================
+
+async def start_round(message: Message, state: FSMContext, db: Database, user_id: int, round_num: int):
+    """Запускает раунд квеста."""
+    data = await state.get_data()
+    weapon = data.get("weapon", "other")
+    
+    # Получаем утверждение
+    statement = get_statement_for_round(weapon, round_num)
+    
+    if not statement:
+        logger.error(f"No statement found for weapon={weapon}, round={round_num}")
+        await message.answer("Произошла ошибка. Попробуйте /restart")
+        return
+    
+    # Сохраняем текущее утверждение в FSM для проверки ответа
+    await state.update_data(
+        current_round=round_num,
+        current_statement_text=statement.text,
+        current_statement_is_truth=statement.is_truth,
+        current_statement_wisdom=statement.wisdom_prompt
+    )
+    
+    # Обновляем базу
+    await db.update_user_round(user_id, round_num)
+    
+    await state.set_state(QuestStates.playing_round)
+    
+    # Отправляем утверждение
+    text = get_statement_text_formatted(statement, round_num)
+    
+    await message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=get_answer_keyboard()
     )
 
-    # Resolve image key (weapon first, then round_num!)
-    image_key = resolve_round_intro_image_key(weapon, round_num)
-    
-    # Send new image and save its message_id
-    img_msg_id = await send_image_if_exists(msg_target, image_key)
-    if img_msg_id:
-        await update_user(user_id, last_image_msg_id=img_msg_id)
-    
-    # Send text with keyboard
-    await msg_target.answer(text, reply_markup=kb_go_check())
-    
-    if is_callback:
-        try:
-            await target.answer()
-        except Exception:
-            pass
 
+# =============================================================================
+# ОТВЕТ НА УТВЕРЖДЕНИЕ
+# =============================================================================
 
-@router.callback_query(F.data == "go_check")
-async def go_check(cb: CallbackQuery):
-    user_id = cb.from_user.id
-    chat_id = cb.message.chat.id
+@router.callback_query(F.data.startswith(f"{CallbackPrefixes.QUEST}:answer:"))
+async def cb_answer(callback: CallbackQuery, state: FSMContext, db: Database):
+    """Обработка ответа на утверждение."""
+    user_id = callback.from_user.id
+    answer = callback.data.split(":")[-1]  # "true" или "false"
+    user_said_true = answer == "true"
     
-    user = await get_user(user_id)
-    rn = int(user.get("round_number") or 1)
+    # Получаем данные из FSM
+    data = await state.get_data()
+    current_round = data.get("current_round", 1)
+    is_truth = data.get("current_statement_is_truth", True)
+    statement_text = data.get("current_statement_text", "")
+    wisdom_prompt = data.get("current_statement_wisdom", "")
+    score = data.get("score", 0)
     
-    # Delete previous image
-    await _delete_previous_image(cb.bot, user_id, chat_id)
+    # Проверяем правильность
+    is_correct = user_said_true == is_truth
     
-    # Delete the text message with button
-    try:
-        await cb.message.delete()
-    except Exception:
-        pass
-    
-    await update_user(user_id, state=f"round_{rn}_answer")
-    
-    # Send new image (answer prompt) and save its message_id
-    img_msg_id = await send_image_if_exists(cb.message, ['img_answer_prompt'])
-    if img_msg_id:
-        await update_user(user_id, last_image_msg_id=img_msg_id)
-    
-    await cb.message.answer(MESSAGES["answer_prompt"], reply_markup=kb_answer())
-    await cb.answer()
-
-
-@router.callback_query(F.data.in_({"answer_true", "answer_false"}))
-async def answer(cb: CallbackQuery):
-    user_id = cb.from_user.id
-    chat_id = cb.message.chat.id
-    
-    user = await get_user(user_id)
-    rn = int(user.get("round_number") or 1)
-
-    player_says_true = cb.data == "answer_true"
-    truth = bool(user.get("current_is_truth"))
-    is_correct = (player_says_true == truth)
-
-    score = int(user.get("score") or 0)
     if is_correct:
         score += 1
-
-    # Delete previous image
-    await _delete_previous_image(cb.bot, user_id, chat_id)
+        await state.update_data(score=score)
+        await db.update_user_score(user_id, score)
     
-    # Delete the text message with button
+    logger.info(f"User {user_id} answered round {current_round}: correct={is_correct}, score={score}")
+    
+    # Деактивируем кнопки
     try:
-        await cb.message.delete()
-    except Exception:
-        pass
+        await callback.message.edit_reply_markup(reply_markup=remove_keyboard())
+    except TelegramBadRequest as e:
+        logger.warning(f"Could not remove keyboard: {e}")
+    
+    await callback.answer("✅ Правильно!" if is_correct else "❌ Неверно!")
+    
+    # Создаем Statement объект для get_wisdom_text
+    statement = Statement(
+        text=statement_text,
+        is_truth=is_truth,
+        wisdom_prompt=wisdom_prompt,
+        level=current_round
+    )
+    
+    # Отправляем результат с объяснением
+    wisdom_text = get_wisdom_text(statement, is_correct)
+    is_last_round = current_round >= 3
+    
+    await callback.message.answer(
+        wisdom_text,
+        parse_mode="HTML",
+        reply_markup=get_next_round_keyboard(is_last=is_last_round)
+    )
 
-    await update_user(user_id, score=score)
 
-    head_key = f"round{rn}_cut" if is_correct else f"round{rn}_alive"
-    head_message = MESSAGES["head_messages"].get(head_key, "")
+# =============================================================================
+# ПЕРЕХОД К СЛЕДУЮЩЕМУ РАУНДУ
+# =============================================================================
 
-    if is_correct:
-        result_text = MESSAGES["result_correct"].format(score=score, head_message=head_message)
-        img_key = 'img_result_correct'
+@router.callback_query(F.data == f"{CallbackPrefixes.QUEST}:next_round")
+async def cb_next_round(callback: CallbackQuery, state: FSMContext, db: Database):
+    """Переход к следующему раунду."""
+    user_id = callback.from_user.id
+    data = await state.get_data()
+    current_round = data.get("current_round", 1)
+    next_round = current_round + 1
+    
+    logger.info(f"User {user_id} moving to round {next_round}")
+    
+    # Деактивируем кнопки
+    try:
+        await callback.message.edit_reply_markup(reply_markup=remove_keyboard())
+    except TelegramBadRequest as e:
+        logger.warning(f"Could not remove keyboard: {e}")
+    
+    await callback.answer()
+    
+    # Запускаем следующий раунд
+    await start_round(callback.message, state, db, user_id, next_round)
+
+
+# =============================================================================
+# ПОКАЗ РЕЗУЛЬТАТА
+# =============================================================================
+
+@router.callback_query(F.data == f"{CallbackPrefixes.QUEST}:show_result")
+async def cb_show_result(callback: CallbackQuery, state: FSMContext, db: Database):
+    """Показывает итоговый результат квеста."""
+    user_id = callback.from_user.id
+    data = await state.get_data()
+    score = data.get("score", 0)
+    weapon = data.get("weapon", "other")
+    hero_class = data.get("hero_class", "businessman")
+    
+    logger.info(f"User {user_id} completed quest with score {score}")
+    
+    # Деактивируем кнопки
+    try:
+        await callback.message.edit_reply_markup(reply_markup=remove_keyboard())
+    except TelegramBadRequest as e:
+        logger.warning(f"Could not remove keyboard: {e}")
+    
+    await callback.answer("🏆 Квест завершен!")
+    
+    # Определяем результат
+    if score == 3:
+        result_text = TEXTS["result_perfect"]
+        result_emoji = "🏆"
+    elif score == 2:
+        result_text = TEXTS["result_good"]
+        result_emoji = "🎖️"
+    elif score == 1:
+        result_text = TEXTS["result_ok"]
+        result_emoji = "🥉"
     else:
-        continue_message = "Продолжаем." if rn < 3 else "Это был последний раунд."
-        result_text = MESSAGES["result_wrong"].format(score=score, continue_message=continue_message)
-        img_key = 'img_result_wrong'
-
-    # Send result image
-    img_msg_id = await send_image_if_exists(cb.message, [img_key])
-    if img_msg_id:
-        await update_user(user_id, last_image_msg_id=img_msg_id)
-
-    if rn < 3:
-        await update_user(user_id, state=f"round_{rn}_result")
-        await cb.message.answer(result_text, reply_markup=kb_next_round(rn + 1))
-        await cb.answer()
-        return
-
-    # раунд 3 → победа/частичная + show_moral
-    await update_user(user_id, state="results", quest_completed=1)
-
-    # prize candidate notify (3/3)
-    if score >= 3:
-        user_for_admin = dict(user)
-        user_for_admin["score"] = score
-        await notify_admin(cb.message.bot, build_prize_candidate(user_for_admin))
-
-    victory_block = MESSAGES["victory_full"] if score >= 3 else MESSAGES["victory_partial"].format(score=score)
-    await cb.message.answer(result_text + "\n\n" + victory_block, reply_markup=kb_show_moral())
-    await cb.answer()
-
-
-@router.callback_query(F.data.startswith("next_round_"))
-async def next_round(cb: CallbackQuery):
-    next_r = int(cb.data.replace("next_round_", ""))
-    await _send_round_intro(cb, round_num=next_r)
-
-
-@router.callback_query(F.data == "show_moral")
-async def show_moral(cb: CallbackQuery):
-    user_id = cb.from_user.id
-    chat_id = cb.message.chat.id
+        result_text = TEXTS["result_bad"]
+        result_emoji = "💪"
     
-    # Delete previous image
-    await _delete_previous_image(cb.bot, user_id, chat_id)
+    # Получаем название оружия
+    weapon_name = WEAPONS.get(weapon, {}).get("name", "Неизвестное оружие")
+    class_name = HERO_CLASSES.get(hero_class, {}).get("name", "Герой")
     
-    # Delete the text message with button
+    # Формируем итоговое сообщение
+    final_text = (
+        f"{result_emoji} <b>Квест завершён!</b>\n\n"
+        f"🎭 Класс: {class_name}\n"
+        f"⚔️ Оружие: {weapon_name}\n"
+        f"⭐ Очки: {score}/3\n\n"
+        f"{result_text}"
+    )
+    
+    # Отмечаем квест как пройденный
+    await db.complete_quest(user_id, score)
+    await state.set_state(QuestStates.viewing_result)
+    
+    await callback.message.answer(
+        final_text,
+        parse_mode="HTML",
+        reply_markup=get_finish_keyboard()
+    )
+    
+    # Уведомляем админов
+    await notify_quest_completed(
+        bot=callback.bot,
+        user_id=user_id,
+        username=callback.from_user.username,
+        full_name=callback.from_user.full_name,
+        result=weapon_name,
+        score=score
+    )
+
+
+# =============================================================================
+# ПОЛУЧЕНИЕ ПРИЗА (ПЕРЕХОД К КОНТАКТАМ)
+# =============================================================================
+
+@router.callback_query(F.data == f"{CallbackPrefixes.QUEST}:get_prize")
+async def cb_get_prize(callback: CallbackQuery, state: FSMContext, db: Database):
+    """Переход к сбору контактов для получения приза."""
+    user_id = callback.from_user.id
+    logger.info(f"User {user_id} wants to get prize")
+    
+    # Деактивируем кнопки
     try:
-        await cb.message.delete()
-    except Exception:
-        pass
+        await callback.message.edit_reply_markup(reply_markup=remove_keyboard())
+    except TelegramBadRequest as e:
+        logger.warning(f"Could not remove keyboard: {e}")
     
-    await update_user(user_id, state="moral")
+    await callback.answer()
     
-    # Send moral image
-    img_msg_id = await send_image_if_exists(cb.message, ['img_moral'])
-    if img_msg_id:
-        await update_user(user_id, last_image_msg_id=img_msg_id)
+    # Импортируем здесь чтобы избежать циклического импорта
+    from handlers.contacts import start_contact_collection
     
-    await cb.message.answer(MESSAGES["moral"], reply_markup=kb_want_workshop())
-    await cb.answer()
+    # Запускаем сбор контактов
+    await start_contact_collection(callback.message, state, db, user_id)
 
 
-@router.callback_query(F.data == "want_workshop")
-async def want_workshop(cb: CallbackQuery):
-    user_id = cb.from_user.id
-    chat_id = cb.message.chat.id
+# =============================================================================
+# РЕСТАРТ КВЕСТА
+# =============================================================================
+
+@router.callback_query(F.data == f"{CallbackPrefixes.QUEST}:restart")
+async def cb_restart_quest(callback: CallbackQuery, state: FSMContext, db: Database):
+    """Перезапуск квеста."""
+    user_id = callback.from_user.id
+    logger.info(f"User {user_id} restarting quest")
     
-    # Delete previous image
-    await _delete_previous_image(cb.bot, user_id, chat_id)
-    
-    # Delete the text message with button
+    # Деактивируем кнопки
     try:
-        await cb.message.delete()
-    except Exception:
-        pass
+        await callback.message.edit_reply_markup(reply_markup=remove_keyboard())
+    except TelegramBadRequest as e:
+        logger.warning(f"Could not remove keyboard: {e}")
     
-    await update_user(user_id, state="wait_phone")
+    await callback.answer("🔄 Начинаем заново!")
     
-    # Send workshop phone ask image
-    img_msg_id = await send_image_if_exists(cb.message, ['img_workshop_ask_phone'])
-    if img_msg_id:
-        await update_user(user_id, last_image_msg_id=img_msg_id)
+    # Сбрасываем состояние
+    await state.clear()
+    await db.reset_user_progress(user_id)
     
-    await cb.message.answer(MESSAGES["ask_phone"])
-    await cb.answer()
+    # Показываем выбор класса
+    await show_class_selection(callback.message, state, db)
