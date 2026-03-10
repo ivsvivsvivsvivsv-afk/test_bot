@@ -1,0 +1,10 @@
+# Deployment guard marker — copy to .deploy-target on server
+# Validated by predeploy_check.py
+
+# For production:
+# TARGET_ENV=production
+# TARGET_INSTANCE=hydra-prod
+
+# For sandbox:
+TARGET_ENV=sandbox
+TARGET_INSTANCE=hydra-sandbox

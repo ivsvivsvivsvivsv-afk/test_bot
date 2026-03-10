@@ -1,0 +1,29 @@
+# /etc/systemd/system/hydra-worker-sandbox.service
+#
+# HYDRA BOT — Sandbox scheduler + broadcasts (single instance)
+
+[Unit]
+Description=HYDRA Quest Worker (SANDBOX Scheduler + Broadcasts)
+After=network.target postgresql.service redis.service hydra-bot-sandbox.service
+Requires=postgresql.service redis.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/hydra_bot_sandbox
+
+ExecStart=/opt/hydra_bot_sandbox/venv/bin/python worker.py
+
+Restart=always
+RestartSec=10
+TimeoutStopSec=15
+
+EnvironmentFile=/opt/hydra_bot_sandbox/.env
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/hydra_bot_sandbox
+
+[Install]
+WantedBy=multi-user.target

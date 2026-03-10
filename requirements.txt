@@ -1,7 +1,28 @@
-aiogram==3.4.1
-aiosqlite==0.19.0
-python-dotenv==1.0.0
-yookassa==3.2.0
-aiohttp==3.9.1
-redis==5.0.1
-asyncpg==0.29.0
+# ===================================================
+# HYDRA BOT — Production Dependencies (v7.3)
+# ===================================================
+
+# Core
+aiogram==3.14.0
+aiohttp==3.10.0
+gunicorn==22.0.0
+
+# Database — asyncpg pool (замена SQLite)
+asyncpg==0.30.0
+
+# Redis — FSM, throttle, activity, holds, file_id cache
+redis[hiredis]==5.2.0
+
+# Scheduler — ТОЛЬКО в worker.py, не в Gunicorn!
+APScheduler==3.10.4
+
+# Payments
+yookassa==3.4.0
+
+# Utils
+python-dotenv==1.0.1
+# aiogram==3.14.0 requires pydantic < 2.10
+pydantic==2.9.2
+
+# Logging
+structlog==24.4.0

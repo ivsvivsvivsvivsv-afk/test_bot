@@ -1,15 +1,15 @@
 """Utils package."""
 
+from utils.content_manager import ContentManager
 from utils.validation import (
-    validate_phone,
-    validate_email,
-    normalize_phone,
     ValidationResult,
+    validate_email,
+    validate_phone,
 )
 
 __all__ = [
-    "validate_phone",
-    "validate_email",
-    "normalize_phone",
+    "ContentManager",
     "ValidationResult",
+    "validate_email",
+    "validate_phone",
 ]

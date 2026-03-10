@@ -1,0 +1,38 @@
+# /etc/systemd/system/hydra-worker.service
+#
+# HYDRA BOT — Scheduler + Рассылки (ОДИН экземпляр!)
+# ====================================================
+# КРИТИЧНО: Этот процесс запускается СТРОГО В ОДНОМ ЭКЗЕМПЛЯРЕ.
+# Если запустить несколько — пользователи получат рассылки N раз!
+#
+# Запуск: systemctl start hydra-worker
+# Логи:  journalctl -u hydra-worker -f
+
+[Unit]
+Description=HYDRA Quest Worker (Scheduler + Broadcasts)
+After=network.target postgresql.service redis.service hydra-bot.service
+Requires=postgresql.service redis.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/hydra_bot
+
+ExecStart=/opt/hydra_bot/venv/bin/python worker.py
+
+Restart=always
+RestartSec=10
+
+# KillSignal=SIGTERM (default) — worker.py обрабатывает корректно
+TimeoutStopSec=15
+
+EnvironmentFile=/opt/hydra_bot/.env
+
+# Безопасность
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/hydra_bot
+
+[Install]
+WantedBy=multi-user.target

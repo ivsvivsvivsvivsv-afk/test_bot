@@ -1,259 +1,295 @@
 """
-Обработчики команды /start и начального флоу.
+/start handler and initial flow.
 
-Особенности:
-- Последовательная отправка сообщений (answer() вместо edit_text() где нужно)
-- Деактивация кнопок после нажатия
-- Обработка глубоких ссылок (utm_source)
+Key decisions:
+- /restart is REMOVED for regular users (quest is one-shot).
+- Returning users who completed the quest see a "workshop?" prompt.
+- Returning users whose quest is in-progress resume from the saved FSM state;
+  if FSM data is lost (Redis eviction) we rebuild it from PostgreSQL.
 """
 
+from __future__ import annotations
+
 import logging
-from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from typing import Any, Dict, Optional
+
+import asyncpg
+from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import CallbackQuery, Message
+from redis.asyncio import Redis
 
-from database import Database
-from texts import TEXTS
 from keyboards.inline import (
-    CallbackPrefixes,
-    get_start_keyboard,
+    CB,
     get_continue_keyboard,
+    get_resume_keyboard,
+    get_start_keyboard,
+    get_welcome_back_keyboard,
     remove_keyboard,
+    url_button,
 )
-from utils.notifications import notify_new_user
-
+from utils.media_ids import get_file_id
+from services.quest_service import (
+    get_or_create_user,
+    get_user,
+    log_event,
+    touch_activity,
+    update_quest_state,
+)
+from utils.content_manager import ContentManager
 logger = logging.getLogger(__name__)
-
 router = Router(name="start")
 
 
-# =============================================================================
-# КОМАНДА /START
-# =============================================================================
+# ── Helpers ─────────────────────────────────────────────────
+
+
+def _first_name(user) -> str:
+    return user.first_name or "Воин"
+
+
+async def _safe_remove_kb(msg: Message) -> None:
+    try:
+        await msg.edit_reply_markup(reply_markup=remove_keyboard())
+    except TelegramBadRequest:
+        pass
+
+
+# Map PG quest_state → FSM state name for resume logic
+_PG_TO_FSM: Dict[str, str] = {
+    "class_selected": "QuestStates:CLASS_SELECTION",
+    "weapon_selected": "QuestStates:WEAPON_SELECTION",
+    "round_1": "QuestStates:ROUND_1",
+    "round_1_done": "QuestStates:ROUND_1_RESULT",
+    "round_2": "QuestStates:ROUND_2",
+    "round_2_done": "QuestStates:ROUND_2_RESULT",
+    "round_3": "QuestStates:ROUND_3",
+    "round_3_done": "QuestStates:ROUND_3_RESULT",
+}
+
+
+async def _try_restore_fsm(
+    state: FSMContext,
+    user_row: Dict[str, Any],
+) -> bool:
+    """
+    Attempt to rebuild FSM data from PostgreSQL backup.
+    Returns True if there is an in-progress quest to resume.
+    """
+    pg_state = user_row.get("quest_state", "start")
+    if pg_state in ("start", "completed") or user_row.get("quest_completed"):
+        return False
+
+    fsm_data: Dict[str, Any] = {}
+    if user_row.get("player_class"):
+        fsm_data["hero_class"] = user_row["player_class"]
+    if user_row.get("weapon"):
+        fsm_data["weapon"] = user_row["weapon"]
+    fsm_data["current_round"] = user_row.get("round_number") or 0
+    fsm_data["score"] = user_row.get("score") or 0
+
+    await state.update_data(**fsm_data)
+
+    fsm_state_name = _PG_TO_FSM.get(pg_state)
+    if fsm_state_name:
+        await state.set_state(fsm_state_name)
+
+    return True
+
+
+# ── /start ──────────────────────────────────────────────────
+
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext, db: Database):
-    """
-    Обработка команды /start.
-    Поддерживает глубокие ссылки: /start utm_tiktok
-    """
+async def cmd_start(
+    message: Message,
+    state: FSMContext,
+    pool: asyncpg.Pool,
+    redis_conn: Redis,
+) -> None:
     user = message.from_user
     user_id = user.id
-    
-    # Извлекаем utm_source из глубокой ссылки
+
     args = message.text.split(maxsplit=1)
     source = args[1] if len(args) > 1 else None
-    
-    logger.info(f"User {user_id} started bot, source: {source}")
-    
-    # Очищаем состояние FSM для чистого старта
-    await state.clear()
-    
-    # Проверяем, есть ли пользователь в базе
-    existing_user = await db.get_user(user_id)
-    
-    if existing_user:
-        # Пользователь уже был, обновляем last_activity
-        await db.update_user_activity(user_id)
-        logger.info(f"Returning user {user_id}")
-        
-        # Проверяем, проходил ли квест
-        if existing_user.get("quest_completed"):
-            # Показываем сообщение о возвращении
-            await message.answer(
-                TEXTS["welcome_back"],
-                parse_mode="HTML"
-            )
-            return
-    else:
-        # Новый пользователь
-        await db.add_user(
+
+    logger.info("User %s /start, source=%s", user_id, source)
+
+    existing = await get_user(pool, user_id)
+
+    if existing is None:
+        await get_or_create_user(
+            pool,
             user_id=user_id,
             username=user.username,
             first_name=user.first_name,
-            last_name=user.last_name,
-            source=source
+            source=source,
         )
-        logger.info(f"New user {user_id} registered, source: {source}")
-        
-        # Уведомляем админов о новом пользователе
-        await notify_new_user(
-            bot=message.bot,
-            user_id=user_id,
-            username=user.username,
-            full_name=user.full_name,
-            source=source
-        )
-    
-    # Отправляем приветственное сообщение с клавиатурой
-    await message.answer(
-        TEXTS["welcome"],
-        parse_mode="HTML",
-        reply_markup=get_start_keyboard()
-    )
+        await log_event(pool, user_id, "bot_start", {"source": source})
+        await touch_activity(redis_conn, user_id)
 
+        img_start = get_file_id("img_start")
+        welcome = ContentManager.get("welcome")
+        if img_start:
+            await message.answer_photo(
+                photo=img_start,
+                caption=welcome,
+                reply_markup=get_start_keyboard(),
+            )
+        else:
+            await message.answer(welcome, reply_markup=get_start_keyboard())
+        return
 
-# =============================================================================
-# ОБРАБОТКА КНОПОК СТАРТОВОГО МЕНЮ
-# =============================================================================
+    # ── Returning user ──────────────────────────────────────
+    await touch_activity(redis_conn, user_id)
+    first = _first_name(user)
 
-@router.callback_query(F.data == f"{CallbackPrefixes.START}:begin_quest")
-async def cb_begin_quest(callback: CallbackQuery, state: FSMContext, db: Database):
-    """
-    Начало квеста.
-    Деактивируем кнопки и переходим к выбору класса.
-    """
-    user_id = callback.from_user.id
-    logger.info(f"User {user_id} clicked begin_quest")
-    
-    # ВАЖНО: Деактивируем кнопки на предыдущем сообщении
-    try:
-        await callback.message.edit_reply_markup(reply_markup=remove_keyboard())
-    except TelegramBadRequest as e:
-        logger.warning(f"Could not remove keyboard: {e}")
-    
-    # Подтверждаем callback чтобы убрать "часики"
-    await callback.answer()
-    
-    # Отправляем НОВОЕ сообщение (не редактируем) для четкой последовательности
-    await callback.message.answer(
-        TEXTS["quest_intro"],
-        parse_mode="HTML",
-        reply_markup=get_continue_keyboard()
-    )
-    
-    # Обновляем статус в базе
-    await db.update_user_step(user_id, "quest_intro")
-
-
-@router.callback_query(F.data == f"{CallbackPrefixes.START}:about_course")
-async def cb_about_course(callback: CallbackQuery):
-    """Информация о курсе."""
-    logger.info(f"User {callback.from_user.id} clicked about_course")
-    
-    # Деактивируем кнопки
-    try:
-        await callback.message.edit_reply_markup(reply_markup=remove_keyboard())
-    except TelegramBadRequest as e:
-        logger.warning(f"Could not remove keyboard: {e}")
-    
-    await callback.answer()
-    
-    # Отправляем информацию о курсе
-    await callback.message.answer(
-        TEXTS["about_course"],
-        parse_mode="HTML",
-        reply_markup=get_start_keyboard()  # Снова показываем стартовые кнопки
-    )
-
-
-@router.callback_query(F.data == f"{CallbackPrefixes.START}:continue")
-async def cb_continue_to_class(callback: CallbackQuery, state: FSMContext, db: Database):
-    """
-    Переход к выбору класса после вводной информации.
-    """
-    user_id = callback.from_user.id
-    logger.info(f"User {user_id} continues to class selection")
-    
-    # Деактивируем кнопки
-    try:
-        await callback.message.edit_reply_markup(reply_markup=remove_keyboard())
-    except TelegramBadRequest as e:
-        logger.warning(f"Could not remove keyboard: {e}")
-    
-    await callback.answer()
-    
-    # Импортируем здесь чтобы избежать циклического импорта
-    from handlers.quest import show_class_selection
-    
-    # Показываем выбор класса
-    await show_class_selection(callback.message, state, db)
-
-
-# =============================================================================
-# КОМАНДА /HELP
-# =============================================================================
-
-@router.message(Command("help"))
-async def cmd_help(message: Message):
-    """Показывает справку."""
-    await message.answer(
-        TEXTS["help"],
-        parse_mode="HTML"
-    )
-
-
-# =============================================================================
-# КОМАНДА /RESTART
-# =============================================================================
-
-@router.message(Command("restart"))
-async def cmd_restart(message: Message, state: FSMContext, db: Database):
-    """
-    Перезапуск квеста.
-    Сбрасывает прогресс пользователя.
-    """
-    user_id = message.from_user.id
-    logger.info(f"User {user_id} requested restart")
-    
-    # Сбрасываем FSM состояние
-    await state.clear()
-    
-    # Сбрасываем прогресс в базе (но не удаляем пользователя)
-    await db.reset_user_progress(user_id)
-    
-    await message.answer(
-        TEXTS["restart_confirm"],
-        parse_mode="HTML",
-        reply_markup=get_start_keyboard()
-    )
-
-
-# =============================================================================
-# КОМАНДА /STATUS
-# =============================================================================
-
-@router.message(Command("status"))
-async def cmd_status(message: Message, db: Database):
-    """
-    Показывает текущий статус пользователя.
-    """
-    user_id = message.from_user.id
-    user_data = await db.get_user(user_id)
-    
-    if not user_data:
+    if existing.get("quest_completed"):
         await message.answer(
-            "Вы еще не начали квест. Нажмите /start",
-            parse_mode="HTML"
+            ContentManager.get("welcome_back_completed", first_name=first),
+            reply_markup=get_welcome_back_keyboard(),
         )
         return
-    
-    # Формируем статус
-    status_parts = []
-    
-    if user_data.get("hero_class"):
-        status_parts.append(f"🎭 Класс: {user_data['hero_class']}")
-    
-    if user_data.get("weapon"):
-        status_parts.append(f"⚔️ Оружие: {user_data['weapon']}")
-    
-    if user_data.get("current_round"):
-        status_parts.append(f"🎯 Раунд: {user_data['current_round']}/3")
-    
-    if user_data.get("score") is not None:
-        status_parts.append(f"⭐ Очки: {user_data['score']}")
-    
-    if user_data.get("quest_completed"):
-        status_parts.append("✅ Квест пройден!")
-    
-    if not status_parts:
-        status_parts.append("Квест еще не начат")
-    
-    status_text = "\n".join(status_parts)
-    
-    await message.answer(
-        f"<b>📊 Ваш статус:</b>\n\n{status_text}",
-        parse_mode="HTML"
+
+    # Quest in progress — try to restore FSM
+    has_progress = await _try_restore_fsm(state, existing)
+    if has_progress:
+        await message.answer(
+            ContentManager.get("welcome_back_in_progress", first_name=first),
+            reply_markup=get_resume_keyboard(),
+        )
+        return
+
+    # Edge case: user exists but quest_state='start' (registered but never started)
+    await state.clear()
+    img_start = get_file_id("img_start")
+    welcome = ContentManager.get("welcome")
+    if img_start:
+        await message.answer_photo(
+            photo=img_start,
+            caption=welcome,
+            reply_markup=get_start_keyboard(),
+        )
+    else:
+        await message.answer(welcome, reply_markup=get_start_keyboard())
+
+
+# ── Begin quest button ──────────────────────────────────────
+
+
+@router.callback_query(F.data == f"{CB.START}:begin_quest")
+async def cb_begin_quest(
+    callback: CallbackQuery,
+    state: FSMContext,
+    pool: asyncpg.Pool,
+    redis_conn: Redis,
+) -> None:
+    user_id = callback.from_user.id
+    logger.info("User %s begin_quest", user_id)
+
+    await _safe_remove_kb(callback.message)
+    await callback.answer()
+
+    await log_event(pool, user_id, "quest_start")
+    await update_quest_state(pool, user_id, "quest_intro")
+
+    quest_intro = ContentManager.get("quest_intro")
+    img_prepare = get_file_id("img_prepare")
+    if img_prepare:
+        await callback.message.answer_photo(
+            photo=img_prepare,
+            caption=quest_intro,
+            reply_markup=get_continue_keyboard(),
+        )
+    else:
+        await callback.message.answer(
+            quest_intro,
+            reply_markup=get_continue_keyboard(),
+        )
+
+
+# ── Continue → class selection ──────────────────────────────
+
+
+@router.callback_query(F.data == f"{CB.START}:continue")
+async def cb_continue_to_class(
+    callback: CallbackQuery,
+    state: FSMContext,
+    pool: asyncpg.Pool,
+    redis_conn: Redis,
+) -> None:
+    logger.info("User %s → class selection", callback.from_user.id)
+
+    await _safe_remove_kb(callback.message)
+    await callback.answer()
+
+    from handlers.quest import show_class_selection
+
+    await show_class_selection(callback.message, state, pool, callback.from_user.id)
+
+
+# ── About course ────────────────────────────────────────────
+
+
+@router.callback_query(F.data == f"{CB.START}:about_course")
+async def cb_about_course(callback: CallbackQuery) -> None:
+    await _safe_remove_kb(callback.message)
+    await callback.answer()
+    await callback.message.answer(
+        ContentManager.get("about_course"),
+        reply_markup=get_start_keyboard(),
     )
+
+
+# ── Generator (redirect to external bot) ─────────────────────
+
+
+@router.callback_query(F.data == f"{CB.START}:generator")
+async def cb_generator(callback: CallbackQuery) -> None:
+    from config import GENERATOR_BOT_URL
+
+    await _safe_remove_kb(callback.message)
+    await callback.answer()
+    await callback.message.answer(
+        ContentManager.get_raw("generator_info"),
+        reply_markup=url_button("🎬 Открыть Генератор", GENERATOR_BOT_URL),
+    )
+
+
+# ── /help ───────────────────────────────────────────────────
+
+
+@router.message(Command("help"))
+async def cmd_help(message: Message) -> None:
+    await message.answer(ContentManager.get("help"))
+
+
+# ── /status ─────────────────────────────────────────────────
+
+
+@router.message(Command("status"))
+async def cmd_status(message: Message, pool: asyncpg.Pool) -> None:
+    user_id = message.from_user.id
+    row = await get_user(pool, user_id)
+
+    if not row:
+        await message.answer("Вы ещё не начали квест. Нажмите /start")
+        return
+
+    parts: list[str] = []
+    if row.get("player_class"):
+        parts.append(f"🎭 Класс: {row['player_class']}")
+    if row.get("weapon"):
+        parts.append(f"⚔️ Оружие: {row['weapon']}")
+    if row.get("round_number"):
+        parts.append(f"🎯 Раунд: {row['round_number']}/3")
+    if row.get("score") is not None:
+        parts.append(f"⭐ Очки: {row['score']}")
+    if row.get("quest_completed"):
+        parts.append("✅ Квест пройден!")
+    if not parts:
+        parts.append("Квест ещё не начат")
+
+    await message.answer(f"<b>📊 Ваш статус:</b>\n\n" + "\n".join(parts))

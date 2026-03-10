@@ -1,0 +1,45 @@
+# /etc/systemd/system/hydra-bot.service
+#
+# HYDRA BOT — Webhook-сервер (Gunicorn, 4 воркера)
+# ==================================================
+# Запуск:  systemctl start hydra-bot
+# Логи:   journalctl -u hydra-bot -f
+# Reload: systemctl reload hydra-bot  (graceful — HUP signal)
+
+[Unit]
+Description=HYDRA Quest Telegram Bot (Webhook Server)
+After=network.target postgresql.service redis.service
+Requires=postgresql.service redis.service
+
+[Service]
+Type=notify
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/hydra_bot
+
+ExecStart=/opt/hydra_bot/venv/bin/gunicorn bot:app \
+    --worker-class aiohttp.GunicornWebWorker \
+    --workers 4 \
+    --bind 127.0.0.1:8443 \
+    --timeout 30 \
+    --graceful-timeout 10 \
+    --access-logfile - \
+    --error-logfile -
+
+# Graceful reload: Gunicorn перезапускает воркеры по одному при HUP
+ExecReload=/bin/kill -s HUP $MAINPID
+
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+EnvironmentFile=/opt/hydra_bot/.env
+
+# Безопасность
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/hydra_bot
+
+[Install]
+WantedBy=multi-user.target

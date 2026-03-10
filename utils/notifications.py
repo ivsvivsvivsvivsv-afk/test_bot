@@ -1,54 +1,36 @@
 """
-Уведомления администраторам.
+Admin notifications via Telegram.
 
-Отправка уведомлений о новых пользователях, контактах и событиях.
+Sends structured messages to every admin in ADMIN_IDS.
+Silently skips admins who blocked the bot (TelegramForbiddenError).
 """
+
+from __future__ import annotations
 
 import logging
 from typing import Optional
+
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
-from config import settings
+from config import ADMIN_IDS
 
 logger = logging.getLogger(__name__)
 
 
-async def notify_admins(
-    bot: Bot,
-    message: str,
-    parse_mode: str = "HTML"
-) -> int:
-    """
-    Отправляет уведомление всем администраторам.
-    
-    Args:
-        bot: Экземпляр бота
-        message: Текст сообщения
-        parse_mode: Режим парсинга (HTML/Markdown)
-    
-    Returns:
-        Количество успешно отправленных уведомлений
-    """
-    success_count = 0
-    
-    for admin_id in settings.admin_ids:
+async def notify_admins(bot: Bot, message: str, parse_mode: str = "HTML") -> int:
+    sent = 0
+    for admin_id in ADMIN_IDS:
         try:
-            await bot.send_message(
-                chat_id=admin_id,
-                text=message,
-                parse_mode=parse_mode
-            )
-            success_count += 1
-            logger.debug(f"Notification sent to admin {admin_id}")
+            await bot.send_message(chat_id=admin_id, text=message, parse_mode=parse_mode)
+            sent += 1
         except TelegramForbiddenError:
-            logger.warning(f"Admin {admin_id} has blocked the bot")
-        except TelegramBadRequest as e:
-            logger.error(f"Failed to send to admin {admin_id}: {e}")
-        except Exception as e:
-            logger.error(f"Unexpected error sending to admin {admin_id}: {e}")
-    
-    return success_count
+            logger.warning("Admin %s blocked the bot", admin_id)
+        except TelegramBadRequest as exc:
+            logger.error("Bad request to admin %s: %s", admin_id, exc)
+        except Exception:
+            logger.exception("Unexpected error sending to admin %s", admin_id)
+    return sent
 
 
 async def notify_new_user(
@@ -56,30 +38,40 @@ async def notify_new_user(
     user_id: int,
     username: Optional[str],
     full_name: str,
-    source: Optional[str] = None
+    source: Optional[str] = None,
 ) -> None:
-    """
-    Уведомление о новом пользователе.
-    
-    Args:
-        bot: Экземпляр бота
-        user_id: ID пользователя
-        username: Username пользователя
-        full_name: Полное имя
-        source: Источник (utm_source)
-    """
-    username_display = f"@{username}" if username else "нет username"
-    source_display = source if source else "не указан"
-    
-    message = (
-        "👤 <b>Новый пользователь</b>\n\n"
+    un = f"@{username}" if username else "—"
+    src = source or "—"
+    await notify_admins(
+        bot,
+        f"👤 <b>Новый пользователь</b>\n\n"
         f"🆔 ID: <code>{user_id}</code>\n"
         f"📝 Имя: {full_name}\n"
-        f"🔗 Username: {username_display}\n"
-        f"📍 Источник: {source_display}"
+        f"🔗 Username: {un}\n"
+        f"📍 Источник: {src}",
     )
-    
-    await notify_admins(bot, message)
+
+
+async def notify_quest_completed(
+    bot: Bot,
+    user_id: int,
+    username: Optional[str],
+    full_name: str,
+    score: int,
+    player_class: str,
+    weapon: str,
+) -> None:
+    un = f"@{username}" if username else "—"
+    await notify_admins(
+        bot,
+        f"🎮 <b>Квест пройден</b>\n\n"
+        f"🆔 ID: <code>{user_id}</code>\n"
+        f"📝 Имя: {full_name}\n"
+        f"🔗 Username: {un}\n"
+        f"🎭 Класс: {player_class}\n"
+        f"⚔️ Оружие: {weapon}\n"
+        f"⭐ Очки: {score}/3",
+    )
 
 
 async def notify_new_contact(
@@ -88,124 +80,81 @@ async def notify_new_contact(
     username: Optional[str],
     full_name: str,
     phone: Optional[str],
-    email: Optional[str]
 ) -> None:
-    """
-    Уведомление о новом контакте.
-    
-    Args:
-        bot: Экземпляр бота
-        user_id: ID пользователя
-        username: Username
-        full_name: Полное имя
-        phone: Номер телефона
-        email: Email
-    """
-    username_display = f"@{username}" if username else "нет"
-    phone_display = phone if phone else "не указан"
-    email_display = email if email else "не указан"
-    
-    message = (
-        "📱 <b>Новый контакт</b>\n\n"
+    un = f"@{username}" if username else "—"
+    await notify_admins(
+        bot,
+        f"📱 <b>Новый контакт</b>\n\n"
         f"🆔 ID: <code>{user_id}</code>\n"
         f"📝 Имя: {full_name}\n"
-        f"🔗 Username: {username_display}\n"
-        f"📞 Телефон: <code>{phone_display}</code>\n"
-        f"📧 Email: <code>{email_display}</code>"
+        f"🔗 Telegram: {un}\n"
+        f"📞 Телефон: <code>{phone or '—'}</code>",
     )
-    
-    await notify_admins(bot, message)
 
 
-async def notify_quest_completed(
+EXPERIENCE_LABELS = {
+    "beginner": "Только начинаю",
+    "intermediate": "Несколько месяцев",
+    "advanced": "Больше года, ежедневно",
+}
+TOOLS_LABELS = {
+    "chat": "ChatGPT / Claude",
+    "image": "Midjourney / DALL-E / SD",
+    "dev": "API, автоматизации",
+    "all": "Всё вышеперечисленное",
+}
+GOAL_LABELS = {
+    "bot": "Чат-бота или ассистента",
+    "analytics": "Аналитический инструмент",
+    "content": "Генератор контента",
+    "custom": "Свой проект",
+}
+
+
+def _score_arena_lead(q1: str, q2: str, q3: str) -> str:
+    if q1 == "advanced" and q2 in ("dev", "all"):
+        return "🔥 ГОРЯЧИЙ"
+    if q1 == "intermediate" or q2 in ("dev", "all") or q3 in ("bot", "analytics"):
+        return "🟡 ТЁПЛЫЙ"
+    return "🟢 ХОЛОДНЫЙ"
+
+
+async def notify_arena_lead(
     bot: Bot,
     user_id: int,
     username: Optional[str],
     full_name: str,
-    result: str,
-    score: int
+    phone: Optional[str],
+    q1: str,
+    q2: str,
+    q3: str,
 ) -> None:
-    """
-    Уведомление о завершении квеста.
-    
-    Args:
-        bot: Экземпляр бота
-        user_id: ID пользователя
-        username: Username
-        full_name: Полное имя
-        result: Результат (специализация)
-        score: Набранные очки
-    """
-    username_display = f"@{username}" if username else "нет"
-    
-    message = (
-        "🎮 <b>Квест пройден</b>\n\n"
+    un = f"@{username}" if username else "—"
+    scoring = _score_arena_lead(q1, q2, q3)
+    await notify_admins(
+        bot,
+        f"⚔️ <b>НОВЫЙ ЛИД С АРЕНЫ</b>\n\n"
         f"🆔 ID: <code>{user_id}</code>\n"
         f"📝 Имя: {full_name}\n"
-        f"🔗 Username: {username_display}\n"
-        f"🏆 Результат: {result}\n"
-        f"⭐ Очки: {score}"
+        f"🔗 Telegram: {un}\n\n"
+        f"📊 <b>Квалификация:</b>\n"
+        f"  Опыт: {EXPERIENCE_LABELS.get(q1, q1)}\n"
+        f"  Инструменты: {TOOLS_LABELS.get(q2, q2)}\n"
+        f"  Цель: {GOAL_LABELS.get(q3, q3)}\n\n"
+        f"📱 Телефон: <code>{phone or '—'}</code>\n\n"
+        f"🎯 Скоринг: {scoring}",
     )
-    
-    await notify_admins(bot, message)
-
-
-async def notify_arena_completed(
-    bot: Bot,
-    user_id: int,
-    username: Optional[str],
-    full_name: str,
-    specialization: str,
-    tasks_completed: int,
-    total_tasks: int
-) -> None:
-    """
-    Уведомление о завершении арены.
-    
-    Args:
-        bot: Экземпляр бота
-        user_id: ID пользователя
-        username: Username
-        full_name: Полное имя
-        specialization: Выбранная специализация
-        tasks_completed: Выполнено заданий
-        total_tasks: Всего заданий
-    """
-    username_display = f"@{username}" if username else "нет"
-    
-    message = (
-        "⚔️ <b>Арена пройдена</b>\n\n"
-        f"🆔 ID: <code>{user_id}</code>\n"
-        f"📝 Имя: {full_name}\n"
-        f"🔗 Username: {username_display}\n"
-        f"🎯 Специализация: {specialization}\n"
-        f"✅ Задания: {tasks_completed}/{total_tasks}"
-    )
-    
-    await notify_admins(bot, message)
 
 
 async def notify_error(
     bot: Bot,
     error_type: str,
     error_message: str,
-    user_id: Optional[int] = None
+    user_id: Optional[int] = None,
 ) -> None:
-    """
-    Уведомление об ошибке.
-    
-    Args:
-        bot: Экземпляр бота
-        error_type: Тип ошибки
-        error_message: Сообщение об ошибке
-        user_id: ID пользователя (если связано с пользователем)
-    """
     user_info = f"\n🆔 User ID: <code>{user_id}</code>" if user_id else ""
-    
-    message = (
-        f"⚠️ <b>Ошибка: {error_type}</b>\n"
-        f"{user_info}\n"
-        f"📝 Описание: <code>{error_message[:500]}</code>"
+    await notify_admins(
+        bot,
+        f"⚠️ <b>Ошибка: {error_type}</b>{user_info}\n"
+        f"📝 <code>{error_message[:500]}</code>",
     )
-    
-    await notify_admins(bot, message)

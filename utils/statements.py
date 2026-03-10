@@ -1,256 +1,240 @@
 """
-Загрузка утверждений (statements) для квеста.
+Statement loader with Redis cache.
 
-Утверждения хранятся в текстовых файлах по специализациям (weapons).
-Формат файла: LEVEL|TYPE|STATEMENT|WISDOM_PROMPT
+Statements live in ``statements/{weapon}.txt`` on disk.
+On first access they are parsed and cached in Redis for 1 hour so
+subsequent requests skip file I/O entirely.
 
-Пример:
-1|false|Email-маркетинг мёртв|Проверь статистику Mailchimp
+File format (pipe-separated):
+    LEVEL|TYPE|STATEMENT|WISDOM_PROMPT
+    1|false|Email-маркетинг мёртв|Проверь статистику Mailchimp
 """
 
+from __future__ import annotations
+
+import json
 import logging
 import random
+from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Optional
-from dataclasses import dataclass
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# Путь к папке с утверждениями
 STATEMENTS_DIR = Path(__file__).parent.parent / "statements"
+REDIS_TTL = 3600  # 1 hour
+
+ROUND_NAMES: Dict[int, str] = {
+    1: "🐉 ГОЛОВА ПЕРВАЯ: ХАОС",
+    2: "🐉 ГОЛОВА ВТОРАЯ: СОМНЕНИЕ",
+    3: "🐉 ГОЛОВА ТРЕТЬЯ: ИСТИНА",
+}
 
 
 @dataclass
 class Statement:
-    """Структура утверждения."""
     text: str
     is_truth: bool
     wisdom_prompt: str
     level: int
 
 
-def load_statements(weapon: str) -> dict[int, list[Statement]]:
-    """
-    Загружает утверждения из файла для конкретного оружия (специализации).
-    
-    Args:
-        weapon: Название оружия/специализации (marketing, analytics, etc.)
-    
-    Returns:
-        Словарь {level: [Statement, ...]}
-    
-    Формат файла:
-        LEVEL|TYPE|STATEMENT|WISDOM_PROMPT
-        1|false|Email-маркетинг мёртв|Проверь статистику Mailchimp
-    """
-    filepath = STATEMENTS_DIR / f"{weapon}.txt"
-    
+# ── Disk parser ─────────────────────────────────────────────
+
+
+def _parse_file(filepath: Path) -> Dict[int, List[Statement]]:
+    result: Dict[int, List[Statement]] = {1: [], 2: [], 3: []}
     if not filepath.exists():
-        logger.warning(f"Statements file not found: {filepath}, using fallback")
-        filepath = STATEMENTS_DIR / "other.txt"
-    
-    if not filepath.exists():
-        logger.error(f"Fallback statements file not found: {filepath}")
-        return {1: [], 2: [], 3: []}
-    
-    statements: dict[int, list[Statement]] = {1: [], 2: [], 3: []}
-    
+        logger.error("Statements file not found: %s", filepath)
+        return result
+
+    with open(filepath, "r", encoding="utf-8") as fh:
+        for line_num, raw in enumerate(fh, 1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("|")
+            if len(parts) < 4:
+                logger.warning("Bad line %d in %s: %s", line_num, filepath, line[:60])
+                continue
+            try:
+                level = int(parts[0])
+                if level not in (1, 2, 3):
+                    continue
+                result[level].append(
+                    Statement(
+                        text=parts[2],
+                        is_truth=parts[1].lower() == "true",
+                        wisdom_prompt=parts[3],
+                        level=level,
+                    )
+                )
+            except (ValueError, IndexError) as exc:
+                logger.warning("Parse error line %d in %s: %s", line_num, filepath, exc)
+
+    total = sum(len(v) for v in result.values())
+    logger.info("Parsed %d statements from %s", total, filepath.name)
+    return result
+
+
+# ── Redis-cached loader ─────────────────────────────────────
+
+
+def _redis_key(weapon: str) -> str:
+    return f"statements:{weapon}"
+
+
+async def _load_from_redis(redis_conn, weapon: str) -> Optional[Dict[int, List[Statement]]]:
+    raw = await redis_conn.get(_redis_key(weapon))
+    if raw is None:
+        return None
     try:
-        with open(filepath, 'r', encoding='utf-8') as f:
-            for line_num, line in enumerate(f, 1):
-                line = line.strip()
-                
-                # Пропускаем пустые строки и комментарии
-                if not line or line.startswith('#'):
-                    continue
-                
-                parts = line.split('|')
-                if len(parts) < 4:
-                    logger.warning(f"Invalid line {line_num} in {filepath}: {line[:50]}")
-                    continue
-                
-                try:
-                    level = int(parts[0])
-                    is_truth = parts[1].lower() == 'true'
-                    statement_text = parts[2]
-                    wisdom_prompt = parts[3]
-                    
-                    if level in [1, 2, 3]:
-                        statements[level].append(Statement(
-                            text=statement_text,
-                            is_truth=is_truth,
-                            wisdom_prompt=wisdom_prompt,
-                            level=level
-                        ))
-                except (ValueError, IndexError) as e:
-                    logger.warning(f"Error parsing line {line_num} in {filepath}: {e}")
-                    continue
-        
-        total = sum(len(v) for v in statements.values())
-        logger.info(f"Loaded {total} statements from {filepath.name}")
-        
-    except Exception as e:
-        logger.error(f"Error loading statements from {filepath}: {e}")
-    
-    return statements
+        data = json.loads(raw)
+        result: Dict[int, List[Statement]] = {}
+        for lvl_str, items in data.items():
+            result[int(lvl_str)] = [Statement(**s) for s in items]
+        return result
+    except Exception:
+        logger.warning("Corrupt Redis cache for statements:%s, will reload", weapon)
+        return None
 
 
-def get_statement_for_round(weapon: str, round_num: int) -> Optional[Statement]:
+async def _save_to_redis(
+    redis_conn, weapon: str, stmts: Dict[int, List[Statement]]
+) -> None:
+    data = {str(k): [asdict(s) for s in v] for k, v in stmts.items()}
+    try:
+        await redis_conn.setex(_redis_key(weapon), REDIS_TTL, json.dumps(data, ensure_ascii=False))
+    except Exception:
+        logger.warning("Failed to cache statements:%s in Redis", weapon)
+
+
+async def load_statements(
+    weapon: str, redis_conn=None
+) -> Dict[int, List[Statement]]:
     """
-    Возвращает случайное утверждение для раунда.
-    
-    Args:
-        weapon: Название оружия/специализации
-        round_num: Номер раунда (1-3)
-    
-    Returns:
-        Statement или None если не найдено
+    Return ``{level: [Statement, ...]}`` for the given weapon.
+    Uses Redis as a cache layer when available.
     """
-    statements = load_statements(weapon)
-    pool = statements.get(round_num, [])
-    
+    if redis_conn is not None:
+        cached = await _load_from_redis(redis_conn, weapon)
+        if cached is not None:
+            return cached
+
+    filepath = STATEMENTS_DIR / f"{weapon}.txt"
+    if not filepath.exists():
+        logger.warning("No file for weapon=%s, falling back to other.txt", weapon)
+        filepath = STATEMENTS_DIR / "other.txt"
+
+    stmts = _parse_file(filepath)
+
+    if redis_conn is not None:
+        await _save_to_redis(redis_conn, weapon, stmts)
+
+    return stmts
+
+
+# ── Synchronous loader (backward-compat, no Redis) ─────────
+
+
+def load_statements_sync(weapon: str) -> Dict[int, List[Statement]]:
+    filepath = STATEMENTS_DIR / f"{weapon}.txt"
+    if not filepath.exists():
+        filepath = STATEMENTS_DIR / "other.txt"
+    return _parse_file(filepath)
+
+
+# ── Public helpers ──────────────────────────────────────────
+
+FALLBACK_STATEMENT = Statement(
+    text="Нейросети могут заменить 100% профессий к 2030 году.",
+    is_truth=False,
+    wisdom_prompt="Проверь прогнозы экспертов о влиянии ИИ на рынок труда в Perplexity",
+    level=1,
+)
+
+
+def _miniquest_level(day: int) -> int:
+    """Map miniquest day 1-5 to statement level 1-3 for variety."""
+    return ((day - 1) % 3) + 1
+
+
+async def get_statement_for_miniquest(
+    weapon: str, day: int, redis_conn=None
+) -> Statement:
+    """Get a random statement for miniquest day 1-5. Uses level based on day."""
+    level = _miniquest_level(day)
+    stmts = await load_statements(weapon, redis_conn)
+    pool = stmts.get(level, [])
     if not pool:
-        logger.warning(f"No statements for weapon={weapon}, round={round_num}")
-        # Возвращаем fallback
-        return Statement(
-            text="Нейросети могут заменить 100% профессий к 2030 году.",
-            is_truth=False,
-            wisdom_prompt="Проверь прогнозы экспертов о влиянии ИИ на рынок труда в Perplexity",
-            level=round_num
-        )
-    
+        all_pool = []
+        for lst in stmts.values():
+            all_pool.extend(lst)
+        pool = all_pool
+    if not pool:
+        return FALLBACK_STATEMENT
     return random.choice(pool)
 
 
-def get_statement_text_formatted(statement: Statement, round_num: int, total_rounds: int = 3) -> str:
-    """
-    Форматирует текст утверждения для отображения.
-    
-    Args:
-        statement: Объект Statement
-        round_num: Номер текущего раунда
-        total_rounds: Всего раундов
-    
-    Returns:
-        Отформатированный текст
-    """
+async def get_statement_for_round(
+    weapon: str, round_num: int, redis_conn=None
+) -> Statement:
+    stmts = await load_statements(weapon, redis_conn)
+    pool = stmts.get(round_num, [])
+    if not pool:
+        logger.warning("No statements for weapon=%s round=%d, using fallback", weapon, round_num)
+        return Statement(
+            text=FALLBACK_STATEMENT.text,
+            is_truth=FALLBACK_STATEMENT.is_truth,
+            wisdom_prompt=FALLBACK_STATEMENT.wisdom_prompt,
+            level=round_num,
+        )
+    return random.choice(pool)
+
+
+def format_statement(statement: Statement, round_num: int, score: int) -> str:
+    round_name = ROUND_NAMES.get(round_num, f"Раунд {round_num}")
+    progress = "🟢" * score + "⚫" * (round_num - 1 - score)
+    progress_line = f"Раунд {round_num}/3 | Артефакты: {score}" if round_num > 1 else f"Раунд {round_num}/3"
     return (
-        f"🎯 <b>Раунд {round_num}/{total_rounds}</b>\n\n"
+        f"⚔️ <b>{round_name}</b>\n"
+        f"{'─' * 20}\n"
+        f"📊 {progress_line} {progress}\n\n"
+        f"📜 <b>Утверждение:</b>\n"
         f"<i>«{statement.text}»</i>\n\n"
-        "Это правда или ложь?"
-    )
-
-
-def get_wisdom_text(statement: Statement, user_was_correct: bool) -> str:
-    """
-    Возвращает текст мудрости после ответа на утверждение.
-    
-    Args:
-        statement: Объект Statement
-        user_was_correct: Пользователь ответил правильно
-    
-    Returns:
-        Текст с результатом и подсказкой для проверки
-    """
-    if user_was_correct:
-        result_emoji = "✅"
-        result_text = "Правильно!"
-    else:
-        result_emoji = "❌"
-        result_text = "Неверно!"
-    
-    truth_label = "✓ ПРАВДА" if statement.is_truth else "✗ ЛОЖЬ"
-    
-    return (
-        f"{result_emoji} <b>{result_text}</b>\n\n"
-        f"Утверждение: <b>{truth_label}</b>\n\n"
-        f"💡 <b>Проверь сам:</b>\n"
+        f"💡 <b>Подсказка от мудреца:</b>\n"
         f"<i>{statement.wisdom_prompt}</i>\n\n"
-        "Используй Perplexity для проверки фактов!"
+        "Это <b>ПРАВДА</b> или <b>ЛОЖЬ</b>?"
     )
 
 
-# =============================================================================
-# РЕЗУЛЬТАТЫ КВЕСТА
-# =============================================================================
+def format_round_result(
+    is_correct: bool,
+    round_num: int,
+    score: int,
+    statement: Statement,
+) -> str:
+    """Build the rich post-answer message with Hydra head text."""
+    if is_correct:
+        head_key = f"head_round{round_num}_cut"
+    else:
+        head_key = f"head_round{round_num}_alive"
 
-# Специализации и их описания
-SPECIALIZATIONS = {
-    "marketing": {
-        "name": "📊 Маркетолог",
-        "emoji": "📊",
-        "description": "Вы прирождённый маркетолог! ИИ-инструменты помогут вам создавать вирусный контент, анализировать аудиторию и автоматизировать рутину.",
-        "tools": ["ChatGPT для контент-плана", "Midjourney для визуалов", "Perplexity для анализа конкурентов"]
-    },
-    "analytics": {
-        "name": "📈 Аналитик",
-        "emoji": "📈",
-        "description": "Данные — ваша стихия! С ИИ вы сможете обрабатывать массивы данных, строить прогнозы и находить инсайты, которые другие пропускают.",
-        "tools": ["Claude для анализа документов", "ChatGPT Code Interpreter", "NotebookLM для исследований"]
-    },
-    "copywriting": {
-        "name": "✍️ Копирайтер",
-        "emoji": "✍️",
-        "description": "Слова — ваша сила! ИИ станет вашим соавтором, помогая создавать тексты, которые цепляют и продают.",
-        "tools": ["ChatGPT для генерации текстов", "Claude для редактуры", "Perplexity для фактчекинга"]
-    },
-    "design": {
-        "name": "🎨 Дизайнер",
-        "emoji": "🎨",
-        "description": "Визуал — ваш язык! ИИ-инструменты генерации изображений откроют новые горизонты творчества.",
-        "tools": ["Midjourney", "DALL-E 3", "Stable Diffusion", "Canva AI"]
-    },
-    "management": {
-        "name": "📋 Менеджер",
-        "emoji": "📋",
-        "description": "Организация — ваш конёк! ИИ поможет управлять проектами, автоматизировать процессы и координировать команду.",
-        "tools": ["ChatGPT для планирования", "Notion AI", "Автоматизация через n8n"]
-    },
-    "video": {
-        "name": "🎬 Видеомейкер",
-        "emoji": "🎬",
-        "description": "Видео — ваша страсть! ИИ-инструменты для генерации и монтажа видео ускорят ваш workflow в разы.",
-        "tools": ["Veo3 от Google", "Runway ML", "HeyGen для аватаров", "Descript"]
-    },
-    "universal": {
-        "name": "💼 Универсал",
-        "emoji": "💼",
-        "description": "Вы многогранная личность! ИИ поможет вам стать профессионалом сразу в нескольких областях.",
-        "tools": ["Полный стек ИИ-инструментов", "Интеграции между сервисами", "Кастомные решения"]
-    }
-}
+    from utils.content_manager import ContentManager
+    head_text = ContentManager.get(head_key)
 
+    truth_label = "✓ ПРАВДА" if statement.is_truth else "✗ ЛОЖЬ"
 
-def get_specialization_info(spec_key: str) -> dict:
-    """
-    Получает информацию о специализации.
-    
-    Args:
-        spec_key: Ключ специализации (marketing, analytics, etc.)
-    
-    Returns:
-        Словарь с информацией о специализации
-    """
-    return SPECIALIZATIONS.get(spec_key, SPECIALIZATIONS["universal"])
-
-
-def format_result_text(spec_key: str, score: int) -> str:
-    """
-    Форматирует текст результата квеста.
-    
-    Args:
-        spec_key: Ключ специализации
-        score: Набранные очки
-    
-    Returns:
-        Отформатированный текст
-    """
-    spec = get_specialization_info(spec_key)
-    tools_list = "\n".join(f"• {tool}" for tool in spec["tools"])
-    
+    if is_correct:
+        return (
+            f"✅ <b>ВЕРНО!</b>\n\n"
+            f"Утверждение: <b>{truth_label}</b>\n\n"
+            f"{head_text}\n\n"
+            f"Артефакты: <b>{score}/3</b>"
+        )
     return (
-        f"🏆 <b>Ваш результат: {spec['name']}</b>\n\n"
-        f"⭐ Очки: {score}\n\n"
-        f"{spec['description']}\n\n"
-        f"<b>Рекомендуемые инструменты:</b>\n{tools_list}"
+        f"❌ <b>Неверно!</b>\n\n"
+        f"Утверждение: <b>{truth_label}</b>\n\n"
+        f"{head_text}\n\n"
+        f"Артефакты: <b>{score}/3</b>"
     )

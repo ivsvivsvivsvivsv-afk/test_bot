@@ -1,502 +1,303 @@
 """
-Обработчики сбора контактных данных.
+Contact collection handler.
 
-Особенности:
-- FSM состояния для управления потоком (НЕ catch-all обработчики)
-- Валидация телефона (Россия +7, Беларусь +375)
-- Валидация email
-- Понятные сообщения об ошибках
-- Последовательная отправка сообщений
+Provides FSM-based flow: phone (mandatory) → confirmation → save.
+Telegram @username is captured automatically — no manual input needed.
+Email is NOT collected (removed per business requirements).
+
+Called from quest.py (after moral) or from arena.py (after hackathon qualification).
+Uses asyncpg.Pool directly (no legacy Database wrapper).
 """
 
+from __future__ import annotations
+
 import logging
-from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+
+import asyncpg
+from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import CallbackQuery, Message
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from database import Database
-from texts import TEXTS
-from keyboards.inline import CallbackPrefixes, remove_keyboard
-from utils.validation import validate_phone, validate_email, ValidationResult
+from keyboards.inline import CB, get_start_keyboard, remove_keyboard, single_button
+from utils.content_manager import ContentManager
+from utils.media_ids import get_file_id
 from utils.notifications import notify_new_contact
+from utils.validation import validate_phone
 
 logger = logging.getLogger(__name__)
-
 router = Router(name="contacts")
 
 
-# =============================================================================
-# FSM СОСТОЯНИЯ ДЛЯ СБОРА КОНТАКТОВ
-# =============================================================================
+# ── FSM states ──────────────────────────────────────────────
+
 
 class ContactStates(StatesGroup):
-    """Состояния для сбора контактов."""
-    waiting_phone = State()      # Ожидаем ввод телефона
-    waiting_email = State()      # Ожидаем ввод email
-    confirming = State()         # Подтверждение данных
+    waiting_phone = State()
+    confirming = State()
 
 
-# =============================================================================
-# КЛАВИАТУРЫ
-# =============================================================================
+# ── Keyboards (local to this module) ────────────────────────
 
-def get_start_contact_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура начала сбора контактов."""
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(
-            text="📱 Оставить контакт",
-            callback_data=f"{CallbackPrefixes.CONTACT}:start"
+
+def _confirm_kb() -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"{CB.CONTACT}:confirm"))
+    b.row(InlineKeyboardButton(text="✏️ Изменить телефон", callback_data=f"{CB.CONTACT}:edit_phone"))
+    return b.as_markup()
+
+
+def _success_kb() -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="🎓 Узнать о курсе", callback_data=f"{CB.CONTACT}:to_course"))
+    b.row(InlineKeyboardButton(text="🏠 В начало", callback_data=f"{CB.CONTACT}:to_start"))
+    return b.as_markup()
+
+
+def _start_contact_kb() -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="📱 Оставить контакт", callback_data=f"{CB.CONTACT}:start"))
+    b.row(InlineKeyboardButton(text="⏭️ Пропустить", callback_data=f"{CB.CONTACT}:skip_all"))
+    return b.as_markup()
+
+
+# ── Helpers ─────────────────────────────────────────────────
+
+
+async def _safe_remove_kb(msg: Message) -> None:
+    try:
+        await msg.edit_reply_markup(reply_markup=remove_keyboard())
+    except TelegramBadRequest:
+        pass
+
+
+async def _save_contacts(
+    pool: asyncpg.Pool,
+    user_id: int,
+    phone: str,
+) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE users SET
+                phone = $2
+            WHERE user_id = $1
+            """,
+            user_id, phone,
         )
-    )
-    builder.row(
-        InlineKeyboardButton(
-            text="⏭️ Пропустить",
-            callback_data=f"{CallbackPrefixes.CONTACT}:skip_all"
-        )
-    )
-    return builder.as_markup()
 
 
-def get_skip_phone_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура при вводе телефона."""
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(
-            text="⏭️ Пропустить телефон",
-            callback_data=f"{CallbackPrefixes.CONTACT}:skip_phone"
-        )
-    )
-    return builder.as_markup()
+# ── Public entry point (called from quest.py / arena.py) ────
 
 
-def get_skip_email_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура при вводе email."""
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(
-            text="⏭️ Пропустить email",
-            callback_data=f"{CallbackPrefixes.CONTACT}:skip_email"
-        )
-    )
-    return builder.as_markup()
+async def start_contact_collection(
+    message: Message,
+    state: FSMContext,
+    pool: asyncpg.Pool,
+    user_id: int,
+) -> None:
+    from services.quest_service import get_user
 
-
-def get_confirm_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура подтверждения данных."""
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(
-            text="✅ Подтвердить",
-            callback_data=f"{CallbackPrefixes.CONTACT}:confirm"
-        )
-    )
-    builder.row(
-        InlineKeyboardButton(
-            text="✏️ Изменить телефон",
-            callback_data=f"{CallbackPrefixes.CONTACT}:edit_phone"
-        )
-    )
-    builder.row(
-        InlineKeyboardButton(
-            text="✏️ Изменить email",
-            callback_data=f"{CallbackPrefixes.CONTACT}:edit_email"
-        )
-    )
-    return builder.as_markup()
-
-
-def get_success_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура после успешного сохранения."""
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(
-            text="🎓 Узнать о курсе",
-            callback_data=f"{CallbackPrefixes.CONTACT}:to_course"
-        )
-    )
-    builder.row(
-        InlineKeyboardButton(
-            text="🏠 В начало",
-            callback_data=f"{CallbackPrefixes.CONTACT}:to_start"
-        )
-    )
-    return builder.as_markup()
-
-
-# =============================================================================
-# ЗАПУСК СБОРА КОНТАКТОВ
-# =============================================================================
-
-async def start_contact_collection(message: Message, state: FSMContext, db: Database, user_id: int):
-    """
-    Начинает процесс сбора контактов.
-    Вызывается из quest.py после завершения квеста.
-    """
-    logger.info(f"Starting contact collection for user {user_id}")
-    
-    # Проверяем, есть ли уже контакты
-    user_data = await db.get_user(user_id)
-    
-    if user_data and (user_data.get("phone") or user_data.get("email")):
-        # Контакты уже есть
+    row = await get_user(pool, user_id)
+    if row and row.get("phone"):
         await message.answer(
-            "📱 У нас уже есть ваши контакты!\n\n"
-            "Хотите обновить их?",
-            parse_mode="HTML",
-            reply_markup=get_start_contact_keyboard()
+            "📱 У нас уже есть ваш телефон!\n\nХотите обновить его?",
+            reply_markup=_start_contact_kb(),
         )
     else:
-        # Контактов нет
-        await message.answer(
-            TEXTS["contact_intro"],
-            parse_mode="HTML",
-            reply_markup=get_start_contact_keyboard()
-        )
+        intro_text = ContentManager.get_raw("contact_intro")
+        img_final = get_file_id("img_final")
+        if img_final:
+            await message.answer_photo(
+                photo=img_final,
+                caption=intro_text,
+                reply_markup=_start_contact_kb(),
+            )
+        else:
+            await message.answer(intro_text, reply_markup=_start_contact_kb())
 
 
-# =============================================================================
-# ОБРАБОТКА КНОПОК
-# =============================================================================
+# ── Start contact flow ──────────────────────────────────────
 
-@router.callback_query(F.data == f"{CallbackPrefixes.CONTACT}:start")
-async def cb_start_contact(callback: CallbackQuery, state: FSMContext):
-    """Начало сбора контактов - запрос телефона."""
+
+@router.callback_query(F.data == f"{CB.CONTACT}:start")
+async def cb_start_contact(callback: CallbackQuery, state: FSMContext) -> None:
     user_id = callback.from_user.id
-    logger.info(f"User {user_id} started contact collection")
-    
-    # Деактивируем кнопки
-    try:
-        await callback.message.edit_reply_markup(reply_markup=remove_keyboard())
-    except TelegramBadRequest as e:
-        logger.warning(f"Could not remove keyboard: {e}")
-    
+    tg_username = callback.from_user.username
+    logger.info("User %s contact start (tg_username=%s)", user_id, tg_username)
+
+    await _safe_remove_kb(callback.message)
     await callback.answer()
-    
-    # Переходим в состояние ожидания телефона
+
     await state.set_state(ContactStates.waiting_phone)
-    await state.update_data(phone=None, email=None)
-    
+    await state.update_data(
+        phone=None,
+        tg_username=f"@{tg_username}" if tg_username else None,
+    )
+
     await callback.message.answer(
-        TEXTS["contact_phone_request"],
-        parse_mode="HTML",
-        reply_markup=get_skip_phone_keyboard()
+        ContentManager.get_raw("contact_phone_request"),
     )
 
 
-@router.callback_query(F.data == f"{CallbackPrefixes.CONTACT}:skip_phone")
-async def cb_skip_phone(callback: CallbackQuery, state: FSMContext):
-    """Пропуск ввода телефона."""
-    logger.info(f"User {callback.from_user.id} skipped phone")
-    
-    # Деактивируем кнопки
-    try:
-        await callback.message.edit_reply_markup(reply_markup=remove_keyboard())
-    except TelegramBadRequest as e:
-        logger.warning(f"Could not remove keyboard: {e}")
-    
-    await callback.answer("Телефон пропущен")
-    
-    # Переходим к email
-    await state.set_state(ContactStates.waiting_email)
-    
-    await callback.message.answer(
-        TEXTS["contact_email_request"],
-        parse_mode="HTML",
-        reply_markup=get_skip_email_keyboard()
-    )
+# ── Skip all contacts ───────────────────────────────────────
 
 
-@router.callback_query(F.data == f"{CallbackPrefixes.CONTACT}:skip_email")
-async def cb_skip_email(callback: CallbackQuery, state: FSMContext, db: Database):
-    """Пропуск ввода email."""
-    user_id = callback.from_user.id
-    logger.info(f"User {user_id} skipped email")
-    
-    # Деактивируем кнопки
-    try:
-        await callback.message.edit_reply_markup(reply_markup=remove_keyboard())
-    except TelegramBadRequest as e:
-        logger.warning(f"Could not remove keyboard: {e}")
-    
-    await callback.answer("Email пропущен")
-    
-    # Показываем подтверждение
-    await show_confirmation(callback.message, state, db, user_id)
-
-
-@router.callback_query(F.data == f"{CallbackPrefixes.CONTACT}:skip_all")
-async def cb_skip_all(callback: CallbackQuery, state: FSMContext):
-    """Пропуск всего сбора контактов."""
-    logger.info(f"User {callback.from_user.id} skipped all contacts")
-    
-    # Деактивируем кнопки
-    try:
-        await callback.message.edit_reply_markup(reply_markup=remove_keyboard())
-    except TelegramBadRequest as e:
-        logger.warning(f"Could not remove keyboard: {e}")
-    
+@router.callback_query(F.data == f"{CB.CONTACT}:skip_all")
+async def cb_skip_all(callback: CallbackQuery, state: FSMContext) -> None:
+    logger.info("User %s skipped all contacts", callback.from_user.id)
+    await _safe_remove_kb(callback.message)
     await callback.answer()
     await state.clear()
-    
+
     await callback.message.answer(
-        TEXTS["contact_skipped"],
-        parse_mode="HTML",
-        reply_markup=get_success_keyboard()
+        ContentManager.get_raw("contact_skipped"),
+        reply_markup=_success_kb(),
     )
 
 
-@router.callback_query(F.data == f"{CallbackPrefixes.CONTACT}:edit_phone")
-async def cb_edit_phone(callback: CallbackQuery, state: FSMContext):
-    """Редактирование телефона."""
-    logger.info(f"User {callback.from_user.id} wants to edit phone")
-    
-    # Деактивируем кнопки
-    try:
-        await callback.message.edit_reply_markup(reply_markup=remove_keyboard())
-    except TelegramBadRequest as e:
-        logger.warning(f"Could not remove keyboard: {e}")
-    
+# ── Edit phone (from confirmation screen) ───────────────────
+
+
+@router.callback_query(F.data == f"{CB.CONTACT}:edit_phone")
+async def cb_edit_phone(callback: CallbackQuery, state: FSMContext) -> None:
+    await _safe_remove_kb(callback.message)
     await callback.answer()
-    
-    # Возвращаемся к вводу телефона
     await state.set_state(ContactStates.waiting_phone)
-    
     await callback.message.answer(
-        TEXTS["contact_phone_request"],
-        parse_mode="HTML",
-        reply_markup=get_skip_phone_keyboard()
+        ContentManager.get_raw("contact_phone_request"),
     )
 
 
-@router.callback_query(F.data == f"{CallbackPrefixes.CONTACT}:edit_email")
-async def cb_edit_email(callback: CallbackQuery, state: FSMContext):
-    """Редактирование email."""
-    logger.info(f"User {callback.from_user.id} wants to edit email")
-    
-    # Деактивируем кнопки
-    try:
-        await callback.message.edit_reply_markup(reply_markup=remove_keyboard())
-    except TelegramBadRequest as e:
-        logger.warning(f"Could not remove keyboard: {e}")
-    
-    await callback.answer()
-    
-    # Возвращаемся к вводу email
-    await state.set_state(ContactStates.waiting_email)
-    
-    await callback.message.answer(
-        TEXTS["contact_email_request"],
-        parse_mode="HTML",
-        reply_markup=get_skip_email_keyboard()
-    )
+# ── Confirm ─────────────────────────────────────────────────
 
 
-@router.callback_query(F.data == f"{CallbackPrefixes.CONTACT}:confirm")
-async def cb_confirm_contacts(callback: CallbackQuery, state: FSMContext, db: Database):
-    """Подтверждение и сохранение контактов."""
+@router.callback_query(F.data == f"{CB.CONTACT}:confirm")
+async def cb_confirm_contacts(
+    callback: CallbackQuery,
+    state: FSMContext,
+    pool: asyncpg.Pool,
+    redis_conn,
+) -> None:
     user_id = callback.from_user.id
     data = await state.get_data()
     phone = data.get("phone")
-    email = data.get("email")
-    
-    logger.info(f"User {user_id} confirmed contacts: phone={phone}, email={email}")
-    
-    # Деактивируем кнопки
-    try:
-        await callback.message.edit_reply_markup(reply_markup=remove_keyboard())
-    except TelegramBadRequest as e:
-        logger.warning(f"Could not remove keyboard: {e}")
-    
+    tg_username = data.get("tg_username")
+
+    if not phone:
+        await callback.answer("Телефон не указан!", show_alert=True)
+        return
+
+    logger.info(
+        "User %s confirmed contacts: phone=%s tg_username=%s",
+        user_id, phone, tg_username,
+    )
+
+    await _safe_remove_kb(callback.message)
     await callback.answer("✅ Контакты сохранены!")
-    
-    # Сохраняем в базу
-    await db.update_user_contacts(user_id, phone, email)
-    
-    # Уведомляем админов
-    user = callback.from_user
+
+    await _save_contacts(pool, user_id, phone)
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET workshop_registered = TRUE WHERE user_id = $1",
+            user_id,
+        )
+
+    from services.quest_service import log_event
+    await log_event(pool, user_id, "contact_phone", {"phone": phone})
+    await log_event(pool, user_id, "workshop_registered", {})
+
     await notify_new_contact(
         bot=callback.bot,
         user_id=user_id,
-        username=user.username,
-        full_name=user.full_name,
+        username=callback.from_user.username,
+        full_name=callback.from_user.full_name,
         phone=phone,
-        email=email
     )
-    
-    # Очищаем состояние
+
     await state.clear()
-    
-    # Показываем успех
+
     await callback.message.answer(
-        TEXTS["contact_success"],
-        parse_mode="HTML",
-        reply_markup=get_success_keyboard()
-    )
-    
-    # === ПРОМО-АКЦИЯ ===
-    # Отправляем акционное предложение (если есть места)
-    from handlers.promo import send_promo_offer
-    await send_promo_offer(
-        bot=callback.bot,
-        db=db,
-        user_id=user_id,
-        chat_id=callback.message.chat.id
+        ContentManager.get_raw("contact_success"),
+        reply_markup=_success_kb(),
     )
 
-
-@router.callback_query(F.data == f"{CallbackPrefixes.CONTACT}:to_course")
-async def cb_to_course(callback: CallbackQuery, state: FSMContext):
-    """Переход к информации о курсе."""
-    logger.info(f"User {callback.from_user.id} going to course info")
-    
-    # Деактивируем кнопки
     try:
-        await callback.message.edit_reply_markup(reply_markup=remove_keyboard())
-    except TelegramBadRequest as e:
-        logger.warning(f"Could not remove keyboard: {e}")
-    
+        from handlers.upsell import show_upsell_if_available
+        await show_upsell_if_available(
+            bot=callback.bot,
+            user_id=user_id,
+            chat_id=callback.message.chat.id,
+            pool=pool,
+            redis_conn=redis_conn,
+        )
+    except Exception:
+        logger.debug("upsell not available", exc_info=True)
+
+
+# ── Navigation after success ────────────────────────────────
+
+
+@router.callback_query(F.data == f"{CB.CONTACT}:to_course")
+async def cb_to_course(callback: CallbackQuery) -> None:
+    await _safe_remove_kb(callback.message)
     await callback.answer()
-    
-    await callback.message.answer(
-        TEXTS["about_course"],
-        parse_mode="HTML"
-    )
+    await callback.message.answer(ContentManager.get_raw("about_course"))
 
 
-@router.callback_query(F.data == f"{CallbackPrefixes.CONTACT}:to_start")
-async def cb_to_start(callback: CallbackQuery, state: FSMContext):
-    """Возврат в начало."""
-    logger.info(f"User {callback.from_user.id} going to start")
-    
-    # Деактивируем кнопки
-    try:
-        await callback.message.edit_reply_markup(reply_markup=remove_keyboard())
-    except TelegramBadRequest as e:
-        logger.warning(f"Could not remove keyboard: {e}")
-    
+@router.callback_query(F.data == f"{CB.CONTACT}:to_start")
+async def cb_to_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await _safe_remove_kb(callback.message)
     await callback.answer()
     await state.clear()
-    
-    # Импортируем здесь чтобы избежать циклического импорта
-    from keyboards.inline import get_start_keyboard
-    
     await callback.message.answer(
-        TEXTS["welcome"],
-        parse_mode="HTML",
-        reply_markup=get_start_keyboard()
+        ContentManager.get("welcome"),
+        reply_markup=get_start_keyboard(),
     )
 
 
-# =============================================================================
-# ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ (ТОЛЬКО В НУЖНЫХ СОСТОЯНИЯХ!)
-# =============================================================================
+# ── Text input handler: phone (FSM-guarded) ─────────────────
+
 
 @router.message(ContactStates.waiting_phone)
-async def process_phone_input(message: Message, state: FSMContext):
-    """
-    Обработка ввода телефона.
-    ВАЖНО: Срабатывает ТОЛЬКО в состоянии waiting_phone!
-    """
+async def process_phone_input(message: Message, state: FSMContext) -> None:
     user_id = message.from_user.id
-    phone_input = message.text.strip()
-    
-    logger.info(f"User {user_id} entered phone: {phone_input}")
-    
-    # Валидируем телефон
-    result: ValidationResult = validate_phone(phone_input)
-    
+    phone_input = (message.text or "").strip()
+
+    result = validate_phone(phone_input)
     if not result.is_valid:
-        # Ошибка валидации - просим ввести снова
-        logger.info(f"Phone validation failed for user {user_id}: {result.error}")
-        
         await message.answer(
             f"❌ {result.error}\n\n"
-            f"{TEXTS['contact_phone_format_hint']}",
-            parse_mode="HTML",
-            reply_markup=get_skip_phone_keyboard()
+            f"{ContentManager.get_raw('contact_phone_format_hint')}",
         )
         return
-    
-    # Телефон валиден
-    normalized_phone = result.normalized_value
-    logger.info(f"Phone validated for user {user_id}: {normalized_phone}")
-    
-    # Сохраняем в FSM
-    await state.update_data(phone=normalized_phone)
-    
-    # Переходим к email
-    await state.set_state(ContactStates.waiting_email)
-    
-    await message.answer(
-        f"✅ Телефон принят: <code>{normalized_phone}</code>\n\n"
-        f"{TEXTS['contact_email_request']}",
-        parse_mode="HTML",
-        reply_markup=get_skip_email_keyboard()
-    )
+
+    logger.info("User %s phone validated", user_id)
+    await state.update_data(phone=result.normalized_value)
+
+    await _show_confirmation(message, state)
 
 
-@router.message(ContactStates.waiting_email)
-async def process_email_input(message: Message, state: FSMContext, db: Database):
-    """
-    Обработка ввода email.
-    ВАЖНО: Срабатывает ТОЛЬКО в состоянии waiting_email!
-    """
-    user_id = message.from_user.id
-    email_input = message.text.strip()
-    
-    logger.info(f"User {user_id} entered email: {email_input}")
-    
-    # Валидируем email
-    result: ValidationResult = validate_email(email_input)
-    
-    if not result.is_valid:
-        # Ошибка валидации - просим ввести снова
-        logger.info(f"Email validation failed for user {user_id}: {result.error}")
-        
-        await message.answer(
-            f"❌ {result.error}\n\n"
-            f"{TEXTS['contact_email_format_hint']}",
-            parse_mode="HTML",
-            reply_markup=get_skip_email_keyboard()
-        )
-        return
-    
-    # Email валиден
-    normalized_email = result.normalized_value
-    logger.info(f"Email validated for user {user_id}: {normalized_email}")
-    
-    # Сохраняем в FSM
-    await state.update_data(email=normalized_email)
-    
-    # Показываем подтверждение
-    await show_confirmation(message, state, db, user_id)
+# ── Confirmation screen ─────────────────────────────────────
 
 
-# =============================================================================
-# ПОКАЗ ПОДТВЕРЖДЕНИЯ
-# =============================================================================
-
-async def show_confirmation(message: Message, state: FSMContext, db: Database, user_id: int):
-    """Показывает экран подтверждения контактов."""
+async def _show_confirmation(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     phone = data.get("phone")
-    email = data.get("email")
-    
-    # Формируем текст
+    tg_username = data.get("tg_username")
+
     phone_display = f"<code>{phone}</code>" if phone else "не указан"
-    email_display = f"<code>{email}</code>" if email else "не указан"
-    
+    username_display = f"<code>{tg_username}</code>" if tg_username else "не установлен"
+
     await state.set_state(ContactStates.confirming)
-    
     await message.answer(
         f"📋 <b>Проверьте ваши данные:</b>\n\n"
         f"📞 Телефон: {phone_display}\n"
-        f"📧 Email: {email_display}\n\n"
+        f"🔗 Telegram: {username_display}\n\n"
         "Всё верно?",
-        parse_mode="HTML",
-        reply_markup=get_confirm_keyboard()
+        reply_markup=_confirm_kb(),
     )

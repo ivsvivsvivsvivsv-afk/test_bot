@@ -1,0 +1,26 @@
+# Environment
+.env
+.env.local
+*.env.local
+
+# Deploy marker (server-specific)
+.deploy-target
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+
+# Temp/media
+tmp_media/
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

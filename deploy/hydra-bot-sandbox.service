@@ -1,0 +1,39 @@
+# /etc/systemd/system/hydra-bot-sandbox.service
+#
+# HYDRA BOT — Sandbox webhook server
+
+[Unit]
+Description=HYDRA Quest Telegram Bot (SANDBOX Webhook Server)
+After=network.target postgresql.service redis.service
+Requires=postgresql.service redis.service
+
+[Service]
+Type=notify
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/hydra_bot_sandbox
+
+ExecStart=/opt/hydra_bot_sandbox/venv/bin/gunicorn bot:app \
+    --worker-class aiohttp.GunicornWebWorker \
+    --workers 2 \
+    --bind 127.0.0.1:18443 \
+    --timeout 30 \
+    --graceful-timeout 10 \
+    --access-logfile - \
+    --error-logfile -
+
+ExecReload=/bin/kill -s HUP $MAINPID
+
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+EnvironmentFile=/opt/hydra_bot_sandbox/.env
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/hydra_bot_sandbox
+
+[Install]
+WantedBy=multi-user.target

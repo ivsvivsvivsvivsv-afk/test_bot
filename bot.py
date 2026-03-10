@@ -1,401 +1,265 @@
 """
-Главный файл бота НЕЙРО-ЮНИТ.
+Hydra Singularity Bot — production entry point.
 
-HIGHLOAD АРХИТЕКТУРА:
-- Telegram Webhook (не polling!) — масштабируется горизонтально
-- Redis для FSM — состояния шарятся между инстансами  
-- PostgreSQL для данных — выдерживает нагрузку
-- aiohttp сервер — принимает webhooks от Telegram и YooKassa
+Launch modes
+============
+Webhook (production):
+    gunicorn bot:app --worker-class aiohttp.GunicornWebWorker --workers 4
 
-Для 100K+ пользователей!
+Polling (dev only):
+    python bot.py
+
+Architecture rules
+==================
+1. NO APScheduler here — scheduled jobs live in worker.py.
+2. NO bot.delete_webhook() in on_shutdown — graceful reload must not
+   kill the webhook for other workers.
+3. get_webhook_info() before set_webhook() — avoids redundant API calls
+   when 4 workers start simultaneously.
+4. secret_token on webhook — Telegram verifies X-Telegram-Bot-Api-Secret-Token.
+5. ContentManager.load() runs once per worker at import time.
 """
+
+from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import sys
-import json
-from typing import Any, Awaitable, Callable, Dict
+
+from aiohttp import web
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import TelegramObject, Update
+from aiogram.fsm.storage.redis import RedisStorage
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 
-from aiohttp import web
+from config import (
+    BOT_TOKEN,
+    WEBHOOK_HOST,
+    WEBHOOK_PATH,
+    WEBHOOK_SECRET,
+)
+from db import create_pool, close_pool
+from redis_client import create_redis, close_redis
+from utils.content_manager import ContentManager
+from middlewares.db_middleware import DBMiddleware
+from middlewares.logging_mw import LoggingMiddleware
 
-from config import settings
-from database import Database
+# ── Logging ─────────────────────────────────────────────────
 
-# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-    ]
+    handlers=[logging.StreamHandler(sys.stdout)],
 )
-
-# Уменьшаем шум от библиотек
 logging.getLogger("aiogram").setLevel(logging.WARNING)
-logging.getLogger("aiosqlite").setLevel(logging.WARNING)
 logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
-
 logger = logging.getLogger(__name__)
 
+# ── aiohttp app keys (avoid stringly-typed state) ───────────
 
-# =============================================================================
-# ГЛОБАЛЬНЫЕ ОБЪЕКТЫ
-# =============================================================================
+REDIS_URL_KEY: web.AppKey[str] = web.AppKey("redis_url", str)
+BOT_KEY: web.AppKey[Bot] = web.AppKey("bot", Bot)
+DP_KEY: web.AppKey[Dispatcher] = web.AppKey("dp", Dispatcher)
+POOL_KEY: web.AppKey[object] = web.AppKey("pool", object)
+REDIS_CONN_KEY: web.AppKey[object] = web.AppKey("redis_conn", object)
+FSM_REDIS_KEY: web.AppKey[object] = web.AppKey("fsm_redis", object)
 
-bot: Bot = None
-db: Database = None
-dp: Dispatcher = None
+# ── Load content once per worker ────────────────────────────
 
+ContentManager.load("content/texts.json")
 
-# =============================================================================
-# MIDDLEWARE ДЛЯ INJECTION DATABASE
-# =============================================================================
-
-class DatabaseMiddleware:
-    """Middleware для инъекции Database в обработчики."""
-    
-    def __init__(self, database: Database):
-        self.db = database
-    
-    async def __call__(
-        self,
-        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
-        event: TelegramObject,
-        data: Dict[str, Any]
-    ) -> Any:
-        data["db"] = self.db
-        return await handler(event, data)
+# ── Shared dispatcher builder ────────────────────────────────
 
 
-# =============================================================================
-# FSM STORAGE (Redis или Memory)
-# =============================================================================
-
-def get_fsm_storage():
-    """
-    Выбор FSM storage в зависимости от конфигурации.
-    
-    Для production ОБЯЗАТЕЛЬНО используйте Redis!
-    """
-    redis_client = None
-    
-    if settings.redis_url:
-        try:
-            from aiogram.fsm.storage.redis import RedisStorage
-            from redis.asyncio import Redis
-            
-            redis_client = Redis.from_url(settings.redis_url)
-            
-            # Передаём Redis client в promo для distributed locks
-            from handlers.promo import set_redis_client
-            set_redis_client(redis_client)
-            
-            logger.info("✅ Using Redis FSM Storage + Distributed Locks")
-            return RedisStorage(redis=redis_client), redis_client
-        except ImportError:
-            logger.error("❌ redis package not installed! Run: pip install redis")
-            logger.warning("⚠️ Falling back to MemoryStorage")
-        except Exception as e:
-            logger.error(f"❌ Redis connection failed: {e}")
-            logger.warning("⚠️ Falling back to MemoryStorage")
-    
-    from aiogram.fsm.storage.memory import MemoryStorage
-    logger.warning("⚠️ Using MemoryStorage (NOT for production!)")
-    logger.warning("⚠️ Distributed locks DISABLED - promo may have race conditions!")
-    return MemoryStorage(), None
-
-
-# =============================================================================
-# AIOHTTP HANDLERS
-# =============================================================================
-
-async def handle_health(request: web.Request) -> web.Response:
-    """Health check для Amvera и мониторинга."""
-    return web.json_response({
-        "status": "ok",
-        "service": "neuro-unit-bot",
-        "mode": "webhook" if settings.webhook_host else "polling"
-    })
-
-
-async def handle_yookassa_webhook(request: web.Request) -> web.Response:
-    """
-    Webhook endpoint для YooKassa.
-    POST /webhook/yookassa
-    """
-    global bot, db
-    
-    try:
-        body = await request.text()
-        logger.info(f"YooKassa webhook: {body[:500]}")
-        
-        try:
-            data = json.loads(body)
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON from YooKassa: {e}")
-            return web.json_response({"error": "Invalid JSON"}, status=400)
-        
-        event_type = data.get("event")
-        
-        if event_type == "payment.succeeded":
-            payment_obj = data.get("object", {})
-            payment_id = payment_obj.get("id")
-            metadata = payment_obj.get("metadata", {})
-            user_id_str = metadata.get("user_id")
-            
-            logger.info(f"Payment succeeded: id={payment_id}, user_id={user_id_str}")
-            
-            if user_id_str and payment_id:
-                try:
-                    user_id = int(user_id_str)
-                    from handlers.promo import confirm_promo_payment
-                    await confirm_promo_payment(bot, db, user_id, payment_id)
-                    logger.info(f"Payment confirmed for user {user_id}")
-                except ValueError:
-                    logger.error(f"Invalid user_id: {user_id_str}")
-                except Exception as e:
-                    logger.exception(f"Error confirming payment: {e}")
-        
-        # Всегда 200, иначе YooKassa повторяет
-        return web.json_response({"status": "ok"})
-        
-    except Exception as e:
-        logger.exception(f"YooKassa webhook error: {e}")
-        return web.json_response({"status": "error"})
-
-
-# =============================================================================
-# TELEGRAM WEBHOOK HANDLER
-# =============================================================================
-
-async def handle_telegram_webhook(request: web.Request) -> web.Response:
-    """
-    Обработка Telegram webhook.
-    POST /webhook/telegram
-    """
-    global bot, dp
-    
-    try:
-        # Парсим Update от Telegram
-        data = await request.json()
-        update = Update(**data)
-        
-        # Передаём в диспетчер
-        await dp.feed_update(bot=bot, update=update)
-        
-        return web.Response(status=200)
-        
-    except Exception as e:
-        logger.exception(f"Telegram webhook error: {e}")
-        return web.Response(status=500)
-
-
-# =============================================================================
-# STARTUP / SHUTDOWN
-# =============================================================================
-
-async def on_startup(app: web.Application):
-    """Вызывается при старте приложения."""
-    global bot, db, dp
-    
-    logger.info("=" * 60)
-    logger.info("Starting NEURO-UNIT Bot (HIGHLOAD MODE)")
-    logger.info("=" * 60)
-    
-    # Инициализируем базу данных
-    db = Database(settings.db_path)
-    await db.init()
-    logger.info("Database initialized")
-    
-    # Создаём бота
-    bot = Bot(
-        token=settings.bot_token,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
-    )
-    
-    # FSM Storage (+ Redis client for distributed locks)
-    storage, redis_client = get_fsm_storage()
+def _build_dispatcher(
+    pool, redis_conn, fsm_redis,
+) -> Dispatcher:
+    """Shared dispatcher construction for both webhook and polling modes."""
+    storage = RedisStorage(redis=fsm_redis)
     dp = Dispatcher(storage=storage)
-    
-    # Store redis client in app for cleanup
-    app["redis_client"] = redis_client
-    
-    # Middleware
-    dp.update.middleware(DatabaseMiddleware(db))
-    
-    # Роутеры
+
+    from middlewares import ActivityMiddleware, ThrottleMiddleware
+
+    dp.update.middleware(DBMiddleware(pool, redis_conn))
+    dp.update.middleware(ActivityMiddleware())
+    dp.update.middleware(ThrottleMiddleware())
+    dp.update.middleware(LoggingMiddleware())
+
+    from handlers.admin import router as admin_router
     from handlers.start import router as start_router
     from handlers.quest import router as quest_router
-    from handlers.contacts import router as contacts_router
-    from handlers.arena import router as arena_router
-    from handlers.promo import router as promo_router
-    
+
+    dp.include_router(admin_router)
     dp.include_router(start_router)
     dp.include_router(quest_router)
-    dp.include_router(contacts_router)
-    dp.include_router(arena_router)
-    dp.include_router(promo_router)
-    
-    logger.info("Routers registered")
-    
-    # Информация о боте
-    bot_info = await bot.get_me()
-    logger.info(f"Bot: @{bot_info.username} (ID: {bot_info.id})")
-    
-    # Устанавливаем webhook для Telegram
-    if settings.webhook_host:
-        webhook_url = f"{settings.webhook_host}{settings.webhook_path}"
+
+    _optional_routers = [
+        ("handlers.contacts", "contacts"),
+        ("handlers.arena", "arena"),
+        ("handlers.upsell", "upsell"),
+        ("handlers.followup", "followup"),
+    ]
+    for module_path, name in _optional_routers:
+        try:
+            import importlib
+            mod = importlib.import_module(module_path)
+            dp.include_router(mod.router)
+        except (ImportError, AttributeError):
+            logger.warning("%s router not available", name)
+
+    return dp
+
+
+# ── Factory ─────────────────────────────────────────────────
+
+
+async def on_startup(app: web.Application) -> None:
+    pool = await create_pool()
+    redis_conn = await create_redis()
+
+    import redis.asyncio as aioredis
+
+    fsm_redis = aioredis.from_url(
+        app[REDIS_URL_KEY], decode_responses=False
+    )
+
+    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    dp = _build_dispatcher(pool, redis_conn, fsm_redis)
+
+    current_wh = await bot.get_webhook_info()
+    webhook_url = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+    if current_wh.url != webhook_url:
         await bot.set_webhook(
             url=webhook_url,
-            drop_pending_updates=True,
-            allowed_updates=dp.resolve_used_update_types()
+            secret_token=WEBHOOK_SECRET,
+            drop_pending_updates=False,
+            allowed_updates=dp.resolve_used_update_types(),
         )
-        logger.info(f"✅ Telegram Webhook set: {webhook_url}")
+        logger.info("Webhook set: %s", webhook_url)
     else:
-        logger.warning("⚠️ WEBHOOK_HOST not set, webhook not configured")
-    
-    # Сохраняем в app для доступа из handlers
-    app["bot"] = bot
-    app["db"] = db
-    app["dp"] = dp
+        logger.info("Webhook already configured: %s", webhook_url)
 
+    bot_info = await bot.get_me()
+    logger.info("Bot: @%s (id=%s)", bot_info.username, bot_info.id)
 
-async def on_shutdown(app: web.Application):
-    """Вызывается при остановке приложения."""
-    global bot, db
-    
-    logger.info("Shutting down...")
-    
+    app[BOT_KEY] = bot
+    app[DP_KEY] = dp
+    app[POOL_KEY] = pool
+    app[REDIS_CONN_KEY] = redis_conn
+    app[FSM_REDIS_KEY] = fsm_redis
+
+    handler = SimpleRequestHandler(dp, bot, secret_token=WEBHOOK_SECRET)
+    handler.register(app, path=WEBHOOK_PATH)
+
+async def on_shutdown(app: web.Application) -> None:
+    logger.info("Shutting down …")
+
+    bot: Bot | None = app.get(BOT_KEY)
     if bot:
-        # Удаляем webhook
-        if settings.webhook_host:
-            await bot.delete_webhook()
-            logger.info("Webhook deleted")
+        # Do NOT delete_webhook — other workers still need it
         await bot.session.close()
-    
-    if db:
-        await db.close()
-    
-    # Закрываем Redis
-    redis_client = app.get("redis_client")
-    if redis_client:
-        await redis_client.close()
-        logger.info("Redis connection closed")
-    
-    logger.info("Bot stopped")
+
+    fsm_redis = app.get(FSM_REDIS_KEY)
+    if fsm_redis:
+        await fsm_redis.aclose()
+
+    await close_redis()
+    await close_pool()
+    logger.info("Shutdown complete")
 
 
-# =============================================================================
-# СОЗДАНИЕ ПРИЛОЖЕНИЯ
-# =============================================================================
+async def handle_health(request: web.Request) -> web.Response:
+    checks: dict = {"service": "hydra-bot"}
+    try:
+        pool = request.app.get(POOL_KEY)
+        if pool:
+            async with pool.acquire(timeout=2) as conn:
+                await conn.fetchval("SELECT 1")
+            checks["postgres"] = "ok"
+        else:
+            checks["postgres"] = "not_initialized"
+    except Exception as exc:
+        checks["postgres"] = f"error: {exc}"
+
+    try:
+        rc = request.app.get(REDIS_CONN_KEY)
+        if rc:
+            await rc.ping()
+            checks["redis"] = "ok"
+        else:
+            checks["redis"] = "not_initialized"
+    except Exception as exc:
+        checks["redis"] = f"error: {exc}"
+
+    all_ok = checks.get("postgres") == "ok" and checks.get("redis") == "ok"
+    checks["status"] = "ok" if all_ok else "degraded"
+    status_code = 200 if all_ok else 503
+    return web.json_response(checks, status=status_code)
+
 
 def create_app() -> web.Application:
-    """Создание aiohttp приложения."""
-    app = web.Application()
-    
-    # Lifecycle hooks
-    app.on_startup.append(on_startup)
-    app.on_shutdown.append(on_shutdown)
-    
-    # Роуты
-    app.router.add_get("/", handle_health)
-    app.router.add_get("/health", handle_health)
-    app.router.add_post("/webhook/yookassa", handle_yookassa_webhook)
-    app.router.add_post(settings.webhook_path, handle_telegram_webhook)
-    
-    logger.info(f"Routes: /, /health, /webhook/yookassa, {settings.webhook_path}")
-    
-    return app
+    from config import REDIS_URL
+
+    application = web.Application()
+    application[REDIS_URL_KEY] = REDIS_URL
+
+    application.on_startup.append(on_startup)
+    application.on_shutdown.append(on_shutdown)
+
+    from handlers.payment_webhook import handle_yookassa_webhook
+    from handlers.admin_api_http import register_admin_api_routes
+
+    application.router.add_get("/", handle_health)
+    application.router.add_get("/health", handle_health)
+    application.router.add_post("/yookassa/webhook", handle_yookassa_webhook)
+    register_admin_api_routes(application)
+
+    return application
 
 
-# =============================================================================
-# FALLBACK: POLLING MODE (только для локальной разработки!)
-# =============================================================================
+# Gunicorn entry: ``gunicorn bot:app …``
+app = create_app()
 
-async def run_polling():
-    """
-    Запуск в режиме polling.
-    ТОЛЬКО для локальной разработки, НЕ для production!
-    """
-    global bot, db, dp
-    
-    logger.warning("=" * 60)
-    logger.warning("⚠️  POLLING MODE — NOT FOR PRODUCTION!")
-    logger.warning("⚠️  Set WEBHOOK_HOST for production deployment")
-    logger.warning("=" * 60)
-    
-    # Инициализация
-    db = Database(settings.db_path)
-    await db.init()
-    
-    bot = Bot(
-        token=settings.bot_token,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
-    )
-    
-    storage, redis_client = get_fsm_storage()
-    dp = Dispatcher(storage=storage)
-    dp.update.middleware(DatabaseMiddleware(db))
-    
-    # Роутеры
-    from handlers.start import router as start_router
-    from handlers.quest import router as quest_router
-    from handlers.contacts import router as contacts_router
-    from handlers.arena import router as arena_router
-    from handlers.promo import router as promo_router
-    
-    dp.include_router(start_router)
-    dp.include_router(quest_router)
-    dp.include_router(contacts_router)
-    dp.include_router(arena_router)
-    dp.include_router(promo_router)
-    
+
+# ── Polling fallback (dev only) ─────────────────────────────
+
+
+async def run_polling() -> None:
+    logger.warning("=" * 50)
+    logger.warning("POLLING MODE — NOT FOR PRODUCTION")
+    logger.warning("=" * 50)
+
+    from config import REDIS_URL
+    import redis.asyncio as aioredis
+
+    pool = await create_pool()
+    redis_conn = await create_redis()
+    fsm_redis = aioredis.from_url(REDIS_URL, decode_responses=False)
+
+    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    dp = _build_dispatcher(pool, redis_conn, fsm_redis)
+
     bot_info = await bot.get_me()
-    logger.info(f"Bot: @{bot_info.username}")
-    
+    logger.info("Bot: @%s", bot_info.username)
+
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
-        await db.close()
         await bot.session.close()
-        if redis_client:
-            await redis_client.close()
-
-
-# =============================================================================
-# ENTRY POINT
-# =============================================================================
-
-def main():
-    """Точка входа."""
-    
-    if settings.webhook_host:
-        # === PRODUCTION: Webhook mode ===
-        app = create_app()
-        
-        port = int(os.getenv("PORT", "8080"))
-        host = os.getenv("HOST", "0.0.0.0")
-        
-        logger.info(f"Starting webhook server on {host}:{port}")
-        web.run_app(app, host=host, port=port, print=None)
-    else:
-        # === DEVELOPMENT: Polling mode ===
-        asyncio.run(run_polling())
+        await fsm_redis.aclose()
+        await close_redis()
+        await close_pool()
 
 
 if __name__ == "__main__":
     try:
-        main()
+        asyncio.run(run_polling())
     except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-    except Exception as e:
-        logger.exception(f"Fatal error: {e}")
+        logger.info("Stopped by user")
+    except Exception:
+        logger.exception("Fatal error")
         sys.exit(1)
