@@ -31,6 +31,7 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 
@@ -116,6 +117,9 @@ def _build_dispatcher(
 # ── Factory ─────────────────────────────────────────────────
 
 
+_STARTUP_TG_TIMEOUT = 15.0  # секунд — если Telegram API недоступен, сервер всё равно поднимется
+
+
 async def on_startup(app: web.Application) -> None:
     pool = await create_pool()
     redis_conn = await create_redis()
@@ -129,21 +133,39 @@ async def on_startup(app: web.Application) -> None:
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = _build_dispatcher(pool, redis_conn, fsm_redis)
 
-    current_wh = await bot.get_webhook_info()
-    webhook_url = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
-    if current_wh.url != webhook_url:
-        await bot.set_webhook(
-            url=webhook_url,
-            secret_token=WEBHOOK_SECRET,
-            drop_pending_updates=False,
-            allowed_updates=dp.resolve_used_update_types(),
-        )
-        logger.info("Webhook set: %s", webhook_url)
-    else:
-        logger.info("Webhook already configured: %s", webhook_url)
+    try:
+        # Случайная задержка — воркеры не бьют SetWebhook одновременно (Flood control)
+        await asyncio.sleep(0.5 * (hash(str(id(app))) % 5))
+        current_wh = await asyncio.wait_for(bot.get_webhook_info(), timeout=_STARTUP_TG_TIMEOUT)
+        webhook_url = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+        if current_wh.url != webhook_url:
+            for attempt in range(3):
+                try:
+                    await asyncio.wait_for(
+                        bot.set_webhook(
+                            url=webhook_url,
+                            secret_token=WEBHOOK_SECRET,
+                            drop_pending_updates=False,
+                            allowed_updates=dp.resolve_used_update_types(),
+                        ),
+                        timeout=_STARTUP_TG_TIMEOUT,
+                    )
+                    break
+                except TelegramRetryAfter as e:
+                    await asyncio.sleep(e.retry_after + 0.5)
+                    continue
+            logger.info("Webhook set: %s", webhook_url)
+        else:
+            logger.info("Webhook already configured: %s", webhook_url)
 
-    bot_info = await bot.get_me()
-    logger.info("Bot: @%s (id=%s)", bot_info.username, bot_info.id)
+        bot_info = await asyncio.wait_for(bot.get_me(), timeout=_STARTUP_TG_TIMEOUT)
+        logger.info("Bot: @%s (id=%s)", bot_info.username, bot_info.id)
+    except asyncio.TimeoutError:
+        logger.warning("Telegram API timeout at startup — webhook may be stale, but HTTP API will work")
+    except TelegramRetryAfter as e:
+        logger.warning("Telegram flood at startup (retry %s s) — HTTP API will work", e.retry_after)
+    except Exception as e:
+        logger.warning("Telegram startup error: %s — HTTP API will work", e)
 
     app[BOT_KEY] = bot
     app[DP_KEY] = dp
@@ -169,6 +191,21 @@ async def on_shutdown(app: web.Application) -> None:
     await close_redis()
     await close_pool()
     logger.info("Shutdown complete")
+
+
+async def _handle_root_or_health(request: web.Request) -> web.Response:
+    """Корень /: HTML для браузера, JSON иначе. /health — всегда JSON."""
+    accept = request.headers.get("Accept", "")
+    if "text/html" in accept:
+        html = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Hydra Bot API</title></head>
+<body style="font-family:sans-serif;max-width:40em;margin:2em auto;padding:1em">
+<h1>Hydra Bot API</h1>
+<p>Это HTTP API Telegram-бота, а не веб-сайт. Используется админкой лендинга.</p>
+<p><a href="/health">/health</a> — проверка состояния (JSON)</p>
+</body></html>"""
+        return web.Response(text=html, content_type="text/html; charset=utf-8")
+    return await handle_health(request)
 
 
 async def handle_health(request: web.Request) -> web.Response:
@@ -212,7 +249,7 @@ def create_app() -> web.Application:
     from handlers.payment_webhook import handle_yookassa_webhook
     from handlers.admin_api_http import register_admin_api_routes
 
-    application.router.add_get("/", handle_health)
+    application.router.add_get("/", _handle_root_or_health)
     application.router.add_get("/health", handle_health)
     application.router.add_post("/yookassa/webhook", handle_yookassa_webhook)
     register_admin_api_routes(application)

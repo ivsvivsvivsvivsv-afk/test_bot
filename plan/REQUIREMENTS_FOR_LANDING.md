@@ -16,9 +16,11 @@
 ```
 BOT_API_URL=https://bot.neurounit.fun
 ADMIN_API_SECRET=<общий_секрет_32+_байт>
+GRASPIL_DASHBOARD_URL=https://app.graspil.com
 ```
 
 - `ADMIN_API_SECRET` — один и тот же в .env бота и лендинга. Генерация: `openssl rand -hex 32`
+- `GRASPIL_DASHBOARD_URL` — ссылка для кнопки «Открыть Graspil» в админке (аналитика только в их интерфейсе, API для чтения нет)
 - Секрет **никогда** не передавать в браузер (только серверные запросы)
 
 Для sandbox окружения лендинга:
@@ -102,14 +104,34 @@ def fetch_bot_stats():
 
 ### 3.4 Автоуведомления (`/admin/notifications`)
 
+**Обязательно в админке** — не «только в боте». CRUD полностью в UI лендинга.
+
 - Список правил (GET `/api/admin/notification-rules`)
-- Форма создания/редактирования: название, текст, сегмент, триггер, расписание
-- Вкл/выкл без удаления
+- Форма создания: `name`, `text_template`, `segment_id`, `trigger_type`, `trigger_config`, `enabled`
+- Редактирование (PUT), удаление (DELETE)
+- Вкл/выкл без удаления (поле `enabled`)
+
+**Схема правил (бот уже поддерживает):**
+
+| Поле | Тип | Пример |
+|------|-----|--------|
+| `name` | str | "Ежедневное напоминание" |
+| `text_template` | str | "Привет! Продолжи квест?" |
+| `segment_id` | str | "quest_in_progress", "all" |
+| `trigger_type` | str | `scheduled_once` или `scheduled_recurring` |
+| `trigger_config` | object | см. ниже |
+| `enabled` | bool | true |
+
+**trigger_config:**
+- `scheduled_once`: `{"send_at": "2025-03-15T10:00:00+03:00"}` — разовая отправка в указанное время (ISO 8601)
+- `scheduled_recurring`: `{"hour": 10, "minute": 0, "days": [0,1,2,3,4,5,6]}` — по расписанию; `days`: понедельник=0, воскресенье=6
 
 ### 3.5 Статистика (`/admin/stats`)
 
-- Блок «Воронка бота» (GET `/api/admin/funnel`)
-- Ссылка на Graspil (если настроен)
+- Блок «Воронка бота» (GET `/api/admin/funnel?days=7`)
+- **Graspil:** Кнопка «Открыть Graspil» → `GRASPIL_DASHBOARD_URL` (по умолчанию `https://app.graspil.com`)
+
+**Важно:** Graspil API не даёт выгружать аналитику. Пользователь переходит на app.graspil.com и логинится сам. Уникальной ссылки на «свой» дашборд нет — только общий вход.
 
 ---
 
