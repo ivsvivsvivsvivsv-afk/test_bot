@@ -128,6 +128,7 @@ fi
 source "${VENV_DIR}/bin/activate"
 pip install -q -U pip
 pip install -q -r requirements.txt
+[[ -f requirements-dev.txt ]] && pip install -q -r requirements-dev.txt || true
 
 echo "[STEP] predeploy check"
 PREDEPLOY_ARGS=("${VENV_DIR}/bin/python" predeploy_check.py --target-env "${ENVIRONMENT}" --check-services)
