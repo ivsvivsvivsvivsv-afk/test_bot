@@ -60,8 +60,11 @@ if [[ ! -f ".env" ]]; then
     exit 1
 fi
 
+# Export all vars from .env for child processes (predeploy_check etc)
+set -a
 # shellcheck source=/dev/null
 source .env
+set +a
 
 echo "[STEP] deployment target summary"
 echo "       ENV=${ENVIRONMENT}"
