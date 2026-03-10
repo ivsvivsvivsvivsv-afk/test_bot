@@ -117,16 +117,17 @@ git fetch --all --prune
 git pull --ff-only
 
 echo "[STEP] install dependencies"
-if [[ ! -d "venv" ]]; then
-    python3 -m venv venv
+VENV_DIR="${PROJECT_DIR}/venv"
+if [[ ! -f "${VENV_DIR}/bin/activate" ]]; then
+    python3 -m venv "${VENV_DIR}"
 fi
 # shellcheck disable=SC1091
-source venv/bin/activate
+source "${VENV_DIR}/bin/activate"
 pip install -q -U pip
 pip install -q -r requirements.txt
 
 echo "[STEP] predeploy check"
-PREDEPLOY_ARGS=(./venv/bin/python predeploy_check.py --target-env "${ENVIRONMENT}" --check-services)
+PREDEPLOY_ARGS=("${VENV_DIR}/bin/python" predeploy_check.py --target-env "${ENVIRONMENT}" --check-services)
 if [[ "${STRICT_PROD}" == "1" ]]; then
     PREDEPLOY_ARGS+=(--strict-prod)
 fi
