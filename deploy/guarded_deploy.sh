@@ -121,10 +121,10 @@ if [[ -f "venv/bin/activate" ]]; then
     # shellcheck disable=SC1091
     source venv/bin/activate
 fi
-python -m pip install -r requirements.txt
+python3 -m pip install -r requirements.txt
 
 echo "[STEP] predeploy check"
-PREDEPLOY_ARGS=(python predeploy_check.py --target-env "${ENVIRONMENT}" --check-services)
+PREDEPLOY_ARGS=(python3 predeploy_check.py --target-env "${ENVIRONMENT}" --check-services)
 if [[ "${STRICT_PROD}" == "1" ]]; then
     PREDEPLOY_ARGS+=(--strict-prod)
 fi
