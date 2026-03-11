@@ -42,11 +42,22 @@ def _int_env(name: str, default: str) -> int:
 
 
 def _parse_admin_ids(raw: str) -> List[int]:
+    """
+    Parse admin IDs from env in a tolerant way.
+
+    Supports commas, spaces, semicolons, line breaks and inline comments.
+    Example valid inputs:
+      "190421400,758800494"
+      "190421400; 758800494"
+      "190421400 758800494 # prod admins"
+    """
     ids: List[int] = []
-    for chunk in raw.split(","):
-        chunk = chunk.strip()
-        if chunk.isdigit():
-            ids.append(int(chunk))
+    seen: set[int] = set()
+    for match in re.findall(r"\d+", raw):
+        admin_id = int(match)
+        if admin_id not in seen:
+            ids.append(admin_id)
+            seen.add(admin_id)
     return ids
 
 

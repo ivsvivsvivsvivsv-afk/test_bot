@@ -3,9 +3,14 @@ Telegram file_id для всех изображений воронки.
 
 Все картинки хранятся в Telegram-серверах и вызываются ТОЛЬКО по file_id.
 Файлы на диске сервера НЕ используются — это исключает content/media и FSInputFile.
+
+ВАЖНО: file_id привязан к конкретному боту. В sandbox берём SANDBOX_MEDIA_FILE_IDS.
+Обновить: python scripts/copy_media_prod_to_sandbox.py --fetch-from-server
 """
 
 from __future__ import annotations
+
+import os
 
 # Все file_id получены однажды через send_photo и сохранены — Telegram их хранит.
 MEDIA_FILE_IDS: dict[str, str] = {
@@ -48,15 +53,39 @@ WEAPON_TO_IMAGE: dict[str, str] = {
 }
 
 
+# Sandbox: file_id от prod не работает. Получены через copy_media_prod_to_sandbox.py (re-upload через @Neurounit_Sandbox_bot).
+SANDBOX_MEDIA_FILE_IDS: dict[str, str] = {
+    "img_analit": "AgACAgIAAxkDAAMZabEpRQSSwEk7K_h2H-C9TIfd0UsAAkYVaxttUolJxvQfQGE2kyIBAAMCAAN5AAM6BA",
+    "img_copy": "AgACAgIAAxkDAAMaabEpRYm192qIG-p74KlEc7rAJj4AAkcVaxttUolJ3pjlX8X-S_gBAAMCAAN5AAM6BA",
+    "img_design": "AgACAgIAAxkDAAMbabEpRjCSUJ5t_VWG8a1QXZM9XPAAAkgVaxttUolJm3Htphit_CEBAAMCAAN5AAM6BA",
+    "img_final": "AgACAgIAAxkDAAMlabEpTrU2tO3TtprEOzpYNM_NPOcAAlMVaxttUolJVrsf2wem9uwBAAMCAAN5AAM6BA",
+    "img_free_boss": "AgACAgIAAxkDAAMXabEpQ6dHCU66hfG0Sl8ptfTwqk0AAkQVaxttUolJLp_3qO-t2uYBAAMCAAN5AAM6BA",
+    "img_gidratt": "AgACAgIAAxkDAAMhabEpS1XNJHsGmmNYTFrvlwrt3QIAAk4VaxttUolJwhOdZBGHT2gBAAMCAAN5AAM6BA",
+    "img_kill": "AgACAgIAAxkDAAMgabEpSmneK5PXnB3EScezw5LcI7AAAk0VaxttUolJHW_rGGiJ_nsBAAMCAAN5AAM6BA",
+    "img_lose": "AgACAgIAAxkDAAMjabEpTE9UGsyDhxwcoJcPmp3vZfUAAlAVaxttUolJlojPzxPJsX8BAAMCAAN5AAM6BA",
+    "img_managment": "AgACAgIAAxkDAAMcabEpRz4EoIm-ac5zw6ZVYv6R-vUAAkkVaxttUolJs0y1JX-wuOcBAAMCAAN5AAM6BA",
+    "img_marketing": "AgACAgIAAxkDAAMdabEpSLRcKSsYYVXep-pO-NnADeEAAkoVaxttUolJAllcCoy513cBAAMCAAN5AAM6BA",
+    "img_other": "AgACAgIAAxkDAAMfabEpSYnphxkM0ZvOW__ZEvBztggAAkwVaxttUolJ6UptfxLD68IBAAMCAAN5AAM6BA",
+    "img_prepare": "AgACAgIAAxkDAAMWabEpQ2fDwcoJ5lbF0MhpAhXp_ZkAAkMVaxttUolJ9SGH1kbuHvYBAAMCAAN5AAM6BA",
+    "img_proff": "AgACAgIAAxkDAAMYabEpRJ8ft3nPzVgr2584qU6t578AAkUVaxttUolJWhg2LGfH2lwBAAMCAAN5AAM6BA",
+    "img_stark": "AgACAgIAAxkDAAMkabEpTefCa8tK_yaVUKeIXa9MDdgAAlIVaxttUolJpXb9Z1bWs5cBAAMCAAN5AAM6BA",
+    "img_start": "AgACAgIAAxkDAAMVabEpQu85wxBRSMeSlMTrjH5QZBUAAkIVaxttUolJJbzCNsF2rVIBAAMCAAN5AAM6BA",
+    "img_video": "AgACAgIAAxkDAAMeabEpSX6mHjSTv1uIavDB-qEM4KcAAksVaxttUolJ7MiGsU-zjykBAAMCAAN5AAM6BA",
+    "img_win": "AgACAgIAAxkDAAMiabEpTBzi949xNije0r8z2AABGViNAAJPFWsbbVKJSekgC73hiivCAQADAgADeQADOgQ",
+}
+
+
 def get_file_id(key: str) -> str | None:
-    """Возвращает file_id по ключу или None, если ключа нет."""
+    """Возвращает file_id по ключу или None, если ключа нет. В sandbox — None (file_id от prod не работает)."""
+    if os.getenv("APP_ENV", "").strip().lower() == "sandbox":
+        return SANDBOX_MEDIA_FILE_IDS.get(key) if SANDBOX_MEDIA_FILE_IDS else None
     return MEDIA_FILE_IDS.get(key)
 
 
 def get_weapon_image(weapon_id: str) -> str | None:
     """Возвращает file_id картинки для выбранного оружия."""
     img_key = WEAPON_TO_IMAGE.get(weapon_id, "img_other")
-    return MEDIA_FILE_IDS.get(img_key)
+    return get_file_id(img_key)
 
 
 # Миниквесты 1–5: file_id пока нет (картинки не сгенерированы).

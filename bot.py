@@ -204,7 +204,7 @@ async def _handle_root_or_health(request: web.Request) -> web.Response:
 <p>Это HTTP API Telegram-бота, а не веб-сайт. Используется админкой лендинга.</p>
 <p><a href="/health">/health</a> — проверка состояния (JSON)</p>
 </body></html>"""
-        return web.Response(text=html, content_type="text/html; charset=utf-8")
+        return web.Response(text=html, content_type="text/html")
     return await handle_health(request)
 
 

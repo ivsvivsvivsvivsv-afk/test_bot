@@ -258,7 +258,7 @@ async def cb_arena_contacts_start(
 # ── Phone input ─────────────────────────────────────────────
 
 
-@router.message(ArenaStates.ARENA_PHONE)
+@router.message(ArenaStates.ARENA_PHONE, F.text, ~F.text.startswith("/"))
 async def process_arena_phone(
     message: Message,
     state: FSMContext,

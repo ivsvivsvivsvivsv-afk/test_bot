@@ -263,7 +263,7 @@ async def cb_to_start(callback: CallbackQuery, state: FSMContext) -> None:
 # ── Text input handler: phone (FSM-guarded) ─────────────────
 
 
-@router.message(ContactStates.waiting_phone)
+@router.message(ContactStates.waiting_phone, F.text, ~F.text.startswith("/"))
 async def process_phone_input(message: Message, state: FSMContext) -> None:
     user_id = message.from_user.id
     phone_input = (message.text or "").strip()

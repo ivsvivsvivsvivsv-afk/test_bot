@@ -30,6 +30,7 @@ else
 fi
 
 cd "$SANDBOX_DIR"
+git config --global --add safe.directory "$SANDBOX_DIR"
 printf 'TARGET_ENV=sandbox\nTARGET_INSTANCE=hydra-sandbox\n' > .deploy-target
 
 if [ -n "$BOT_TOKEN_B64" ] && [ -f .env ]; then
@@ -40,7 +41,7 @@ if [ -n "$BOT_TOKEN_B64" ] && [ -f .env ]; then
 fi
 
 # Install systemd and nginx if not yet done
-if ! systemctl list-unit-files | grep -q hydra-bot-sandbox; then
+if [ ! -f /etc/systemd/system/hydra-bot-sandbox.service ]; then
   sudo cp "$SANDBOX_DIR/deploy/hydra-bot-sandbox.service" /etc/systemd/system/
   sudo cp "$SANDBOX_DIR/deploy/hydra-worker-sandbox.service" /etc/systemd/system/
   sudo cp "$SANDBOX_DIR/deploy/nginx.sandbox.conf" /etc/nginx/sites-available/hydra-bot-sandbox
@@ -48,7 +49,11 @@ if ! systemctl list-unit-files | grep -q hydra-bot-sandbox; then
   sudo chown -R www-data:www-data "$SANDBOX_DIR"
   sudo systemctl daemon-reload
   sudo systemctl enable hydra-bot-sandbox hydra-worker-sandbox
-  sudo nginx -t && sudo systemctl reload nginx
+  if [ -f /etc/letsencrypt/live/bot-sandbox.neurounit.fun/fullchain.pem ]; then
+    sudo nginx -t && sudo systemctl reload nginx
+  else
+    echo "SSL cert for bot-sandbox.neurounit.fun not found. Run: certbot --nginx -d bot-sandbox.neurounit.fun"
+  fi
 fi
 
 if [ -f .env ]; then

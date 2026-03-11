@@ -13,7 +13,7 @@ import io
 import logging
 import asyncpg
 from aiogram import F, Router
-from aiogram.filters import BaseFilter, Command
+from aiogram.filters import BaseFilter, Command, StateFilter
 from aiogram.types import BufferedInputFile, Message
 from redis.asyncio import Redis
 
@@ -39,7 +39,7 @@ class AdminFilter(BaseFilter):
 # ── /stats — Лиды и статусы оплат ────────────────────────────
 
 
-@router.message(Command("stats"), F.text, AdminFilter())
+@router.message(Command("stats"), F.text, StateFilter("*"), AdminFilter())
 async def cmd_stats(
     message: Message,
     pool: asyncpg.Pool,
@@ -99,7 +99,7 @@ async def cmd_stats(
 # ── /slots ────────────────────────────────────────────────────
 
 
-@router.message(Command("slots"), F.text, AdminFilter())
+@router.message(Command("slots"), F.text, StateFilter("*"), AdminFilter())
 async def cmd_slots(
     message: Message,
     pool: asyncpg.Pool,
@@ -115,7 +115,7 @@ async def cmd_slots(
 # ── /reset_user ───────────────────────────────────────────────
 
 
-@router.message(Command("reset_user"), F.text, AdminFilter())
+@router.message(Command("reset_user"), F.text, StateFilter("*"), AdminFilter())
 async def cmd_reset_user(
     message: Message,
     pool: asyncpg.Pool,
@@ -178,7 +178,7 @@ async def cmd_reset_user(
 # ── /reset_all ────────────────────────────────────────────────
 
 
-@router.message(Command("reset_all"), F.text, AdminFilter())
+@router.message(Command("reset_all"), F.text, StateFilter("*"), AdminFilter())
 async def cmd_reset_all(
     message: Message,
     pool: asyncpg.Pool,
@@ -226,7 +226,7 @@ async def cmd_reset_all(
 # ── /broadcast ────────────────────────────────────────────────
 
 
-@router.message(Command("broadcast"), F.text, AdminFilter())
+@router.message(Command("broadcast"), F.text, StateFilter("*"), AdminFilter())
 async def cmd_broadcast(
     message: Message,
     pool: asyncpg.Pool,
@@ -262,7 +262,7 @@ async def cmd_broadcast(
 # ── /export_leads ────────────────────────────────────────────
 
 
-@router.message(Command("export_leads"), F.text, AdminFilter())
+@router.message(Command("export_leads"), F.text, StateFilter("*"), AdminFilter())
 async def cmd_export_leads(
     message: Message,
     pool: asyncpg.Pool,
