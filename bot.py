@@ -25,6 +25,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from pathlib import Path
+from datetime import datetime, timezone
 
 from aiohttp import web
 
@@ -44,6 +46,7 @@ from config import (
 from db import create_pool, close_pool
 from redis_client import create_redis, close_redis
 from utils.content_manager import ContentManager
+from utils.runtime_alerts import send_runtime_alert
 from middlewares.db_middleware import DBMiddleware
 from middlewares.logging_mw import LoggingMiddleware
 
@@ -230,11 +233,35 @@ async def handle_health(request: web.Request) -> web.Response:
             checks["redis"] = "not_initialized"
     except Exception as exc:
         checks["redis"] = f"error: {exc}"
+        try:
+            await send_runtime_alert(
+                request.app.get(BOT_KEY),
+                redis_conn=None,
+                key="bot_redis_health_failed",
+                message=(
+                    "🚨 <b>Hydra bot alert</b>\n\n"
+                    "Redis health-check failed in bot process. API degraded."
+                ),
+            )
+        except Exception:
+            logger.exception("Failed to notify admins about Redis health failure")
 
     all_ok = checks.get("postgres") == "ok" and checks.get("redis") == "ok"
     checks["status"] = "ok" if all_ok else "degraded"
     status_code = 200 if all_ok else 503
     return web.json_response(checks, status=status_code)
+
+
+async def handle_web_v1_health(_request: web.Request) -> web.Response:
+    """Dedicated health endpoint for web client API."""
+    return web.json_response(
+        {
+            "status": "ok",
+            "version": "web/v1",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        },
+        status=200,
+    )
 
 
 def create_app() -> web.Application:
@@ -248,11 +275,32 @@ def create_app() -> web.Application:
 
     from handlers.payment_webhook import handle_yookassa_webhook
     from handlers.admin_api_http import register_admin_api_routes
+    from handlers.web_media_http import register_web_media_routes
+    from handlers.web_flow_http import register_web_flow_routes
 
     application.router.add_get("/", _handle_root_or_health)
     application.router.add_get("/health", handle_health)
+
+    # Debug: list routes (remove in prod)
+    def _debug_routes(request: web.Request) -> web.Response:
+        routes = []
+        for r in application.router.routes():
+            if hasattr(r, "resource") and hasattr(r.resource, "path"):
+                path = getattr(r.resource, "path", "")
+                method = getattr(r, "method", "GET")
+                if path and "api/web" in str(path):
+                    routes.append({"method": method, "path": path})
+        return web.json_response({"web_routes": routes})
+
+    application.router.add_get("/api/debug/routes", _debug_routes)
+    application.router.add_get("/api/web/v1/health", handle_web_v1_health)
     application.router.add_post("/yookassa/webhook", handle_yookassa_webhook)
+    media_dir = Path("content/web_media")
+    if media_dir.exists():
+        application.router.add_static("/static/media", str(media_dir), show_index=False)
     register_admin_api_routes(application)
+    register_web_media_routes(application)
+    register_web_flow_routes(application)
 
     return application
 
