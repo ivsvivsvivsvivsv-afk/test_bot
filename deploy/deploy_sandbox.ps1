@@ -55,6 +55,12 @@ cd "$SANDBOX_DIR"
 echo 'TARGET_ENV=sandbox
 TARGET_INSTANCE=hydra-sandbox' > .deploy-target
 
+# Update nginx config (ensure /api/web/ proxy exists)
+if [ -f deploy/nginx.sandbox.conf ]; then
+  sudo cp deploy/nginx.sandbox.conf /etc/nginx/sites-available/hydra-bot-sandbox
+  sudo nginx -t && sudo systemctl reload nginx
+fi
+
 # Apply migrations (patch4 vk_active_scenario)
 if [ -f migrations/patch4_001_vk_active_scenario.sql ]; then
   source .env 2>/dev/null || true
