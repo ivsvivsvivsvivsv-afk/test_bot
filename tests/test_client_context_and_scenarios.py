@@ -54,7 +54,8 @@ def test_content_registry_get_with_format() -> None:
     from utils.content_registry import load_all
 
     load_all()
-    text = get("default", "result_win", first_name="Тест")
+    # Use key that exists in both legacy and bundle texts
+    text = get("default", "result_perfect", first_name="Тест")
     assert "Тест" in text
 
 
