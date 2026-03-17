@@ -1,0 +1,125 @@
+{
+  "version": 1,
+  "generated_at": "2026-03-13T15:47:55.971213+00:00",
+  "assets": {
+    "img_analit": {
+      "url": "/static/media/img_analit.jpg",
+      "filename": "img_analit.jpg",
+      "mime": "image/jpeg",
+      "size": 228392,
+      "sha256": "fce3f4aaca45a6f7339502a480128ddb2eaf3c7b6cc8ca223f25e69d443defa0"
+    },
+    "img_copy": {
+      "url": "/static/media/img_copy.jpg",
+      "filename": "img_copy.jpg",
+      "mime": "image/jpeg",
+      "size": 273006,
+      "sha256": "2c3b61d47c918e980c8821c69bc3fbdf5b00150354ab557dac891f7e1935cf4a"
+    },
+    "img_design": {
+      "url": "/static/media/img_design.jpg",
+      "filename": "img_design.jpg",
+      "mime": "image/jpeg",
+      "size": 228521,
+      "sha256": "fea6b4c90a95465fa3c4060f49b9a094a0ac338fc99010bea0ab3a309ed4972a"
+    },
+    "img_final": {
+      "url": "/static/media/img_final.jpg",
+      "filename": "img_final.jpg",
+      "mime": "image/jpeg",
+      "size": 200151,
+      "sha256": "53ad0bd20955bfa87029b5afde5212746bf53bc52039048f3b51d3e4e9150be7"
+    },
+    "img_free_boss": {
+      "url": "/static/media/img_free_boss.jpg",
+      "filename": "img_free_boss.jpg",
+      "mime": "image/jpeg",
+      "size": 246043,
+      "sha256": "c5c67de09c10512f72b2b1affd12c9d3e51f7800e4e01739ba33b1b13ec2077e"
+    },
+    "img_gidratt": {
+      "url": "/static/media/img_gidratt.jpg",
+      "filename": "img_gidratt.jpg",
+      "mime": "image/jpeg",
+      "size": 225025,
+      "sha256": "9a4675200e9bf9822fa24b792436a1e317e09bc99de72417b9b222ab987aa81a"
+    },
+    "img_kill": {
+      "url": "/static/media/img_kill.jpg",
+      "filename": "img_kill.jpg",
+      "mime": "image/jpeg",
+      "size": 280739,
+      "sha256": "fc297749e69257aca0de229d70ef2708e9b215777d604f92d6c0511c363a586f"
+    },
+    "img_lose": {
+      "url": "/static/media/img_lose.jpg",
+      "filename": "img_lose.jpg",
+      "mime": "image/jpeg",
+      "size": 354705,
+      "sha256": "ba25f4b6f0b13e59911a9ee46623a3c6e4b3421bac84260afce84a46ac49db15"
+    },
+    "img_managment": {
+      "url": "/static/media/img_managment.jpg",
+      "filename": "img_managment.jpg",
+      "mime": "image/jpeg",
+      "size": 309020,
+      "sha256": "0fc0b0b48c10e41b45e797c67f3d0c8d2827ee41eceaa0ea6466a3889bcafff7"
+    },
+    "img_marketing": {
+      "url": "/static/media/img_marketing.jpg",
+      "filename": "img_marketing.jpg",
+      "mime": "image/jpeg",
+      "size": 248480,
+      "sha256": "04c434bbf438b19bad31f945b320348771c9b714d3a42a6fd318931b6e696972"
+    },
+    "img_other": {
+      "url": "/static/media/img_other.jpg",
+      "filename": "img_other.jpg",
+      "mime": "image/jpeg",
+      "size": 225324,
+      "sha256": "54185e13d762e9575113646082fb724569a480d81bad1aa45916a335d865fdb3"
+    },
+    "img_prepare": {
+      "url": "/static/media/img_prepare.jpg",
+      "filename": "img_prepare.jpg",
+      "mime": "image/jpeg",
+      "size": 197381,
+      "sha256": "ee677414219160f5ee4a4c994033df38b6e481a8d1d27c505a8b4879d847f10e"
+    },
+    "img_proff": {
+      "url": "/static/media/img_proff.jpg",
+      "filename": "img_proff.jpg",
+      "mime": "image/jpeg",
+      "size": 309485,
+      "sha256": "d0fb8e2e20650f0c727622a53b4bc9bac58fa234931643006194fd6a3e331bd1"
+    },
+    "img_stark": {
+      "url": "/static/media/img_stark.jpg",
+      "filename": "img_stark.jpg",
+      "mime": "image/jpeg",
+      "size": 293527,
+      "sha256": "a25a3ab5969d75303ab2361502f64ee2b897beb49122ad46004691665a2b5fe4"
+    },
+    "img_start": {
+      "url": "/static/media/img_start.jpg",
+      "filename": "img_start.jpg",
+      "mime": "image/jpeg",
+      "size": 368030,
+      "sha256": "99530a112327f955147ddf35c4eb6d4dd74cd972df42c1a078e8ad247687b51c"
+    },
+    "img_video": {
+      "url": "/static/media/img_video.jpg",
+      "filename": "img_video.jpg",
+      "mime": "image/jpeg",
+      "size": 274624,
+      "sha256": "aec7f2c1abbef2e40e4879158d1b827bed7a6a100ba9fc389c383674376fa0f1"
+    },
+    "img_win": {
+      "url": "/static/media/img_win.jpg",
+      "filename": "img_win.jpg",
+      "mime": "image/jpeg",
+      "size": 302006,
+      "sha256": "38e2f7a5c2ea52fba129bc79b332a691c6536b00526d80ea00d812eec8601b75"
+    }
+  }
+}
