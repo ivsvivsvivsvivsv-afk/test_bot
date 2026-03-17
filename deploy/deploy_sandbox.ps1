@@ -55,6 +55,12 @@ cd "$SANDBOX_DIR"
 echo 'TARGET_ENV=sandbox
 TARGET_INSTANCE=hydra-sandbox' > .deploy-target
 
+# Apply migrations (patch4 vk_active_scenario)
+if [ -f migrations/patch4_001_vk_active_scenario.sql ]; then
+  source .env 2>/dev/null || true
+  PGPASSWORD="${DB_PASSWORD:-}" psql -U hydra -d hydra_bot_sandbox -h localhost -f migrations/patch4_001_vk_active_scenario.sql 2>/dev/null || true
+fi
+
 if [ -f .env ]; then
   echo "sandbox:hydra-sandbox" | sudo bash deploy/guarded_deploy.sh --env sandbox --project-dir "$SANDBOX_DIR"
 else
