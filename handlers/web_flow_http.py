@@ -720,7 +720,13 @@ async def get_web_stream(request: web.Request) -> web.StreamResponse:
     return resp
 
 
+async def _web_ping(_request: web.Request) -> web.Response:
+    """Debug: verify /api/web/ routes are reachable."""
+    return web.json_response({"pong": True, "route": "api/web"})
+
+
 def register_web_flow_routes(app: web.Application) -> None:
+    app.router.add_get("/api/web/ping", _web_ping)
     app.router.add_post("/api/web/session/start", post_web_session_start)
     app.router.add_get("/api/web/session/state", get_web_session_state)
     app.router.add_post("/api/web/action", post_web_action)
