@@ -23,6 +23,9 @@ from redis.asyncio import Redis
 from config import ADMIN_API_SECRET, SITE_WEBHOOK_SECRET
 from services.broadcast_service import broadcast_segment, count_segment_users
 from services.quest_service import log_event
+from services.scenario_registry import get_scenario_ids_for_bundle, get_vk_scenario_ids
+from utils.content_registry import list_bundles
+from utils.tracking_links import detect_client_channel
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +131,17 @@ async def get_admin_stats(request: web.Request) -> web.Response:
     if auth_error:
         return auth_error
 
+    from bot import REDIS_CONN_KEY
+    redis_conn: Redis | None = request.app.get(REDIS_CONN_KEY)
+    cache_key = "api:admin:stats:v1"
+    if redis_conn is not None:
+        try:
+            cached = await redis_conn.get(cache_key)
+            if cached:
+                return web.Response(text=cached, content_type="application/json")
+        except Exception:
+            logger.exception("Failed to read admin stats cache")
+
     pool = _pool(request)
     async with pool.acquire() as conn:
         users_total = await conn.fetchval("SELECT COUNT(*)::int FROM users") or 0
@@ -152,18 +166,24 @@ async def get_admin_stats(request: web.Request) -> web.Response:
             """
         )
 
-    return _json(
-        {
-            "ok": True,
-            "users_total": users_total,
-            "users_today": users_today,
-            "users_blocked": users_blocked,
-            "leads_quest": leads_quest,
-            "leads_arena": leads_arena,
-            "payments_succeeded": int(payments["succeeded"] or 0),
-            "revenue": float(payments["revenue"] or 0),
-        }
-    )
+    payload = {
+        "ok": True,
+        "users_total": users_total,
+        "users_today": users_today,
+        "users_blocked": users_blocked,
+        "leads_quest": leads_quest,
+        "leads_arena": leads_arena,
+        "payments_succeeded": int(payments["succeeded"] or 0),
+        "revenue": float(payments["revenue"] or 0),
+    }
+
+    if redis_conn is not None:
+        try:
+            await redis_conn.setex(cache_key, 60, json.dumps(payload, ensure_ascii=False))
+        except Exception:
+            logger.exception("Failed to write admin stats cache")
+
+    return _json(payload)
 
 
 async def get_admin_funnel(request: web.Request) -> web.Response:
@@ -172,27 +192,56 @@ async def get_admin_funnel(request: web.Request) -> web.Response:
         return auth_error
 
     days = request.query.get("days", "7")
+    client_type = request.query.get("client_type", "").strip().lower()
+    scenario_id = request.query.get("scenario_id", "").strip().lower()
+    bundle_id = request.query.get("bundle_id", "").strip().lower()
+    ab_variant = request.query.get("ab_variant", "").strip().lower()
     try:
         days_int = max(1, min(int(days), 90))
     except ValueError:
         days_int = 7
 
+    filters: list[str] = ["e.created_at >= NOW() - make_interval(days => $1)"]
+    params: list[Any] = [days_int]
+    idx = 2
+    if client_type:
+        filters.append(f"u.client_type = ${idx}")
+        params.append(client_type)
+        idx += 1
+    if scenario_id:
+        filters.append(f"u.scenario_id = ${idx}")
+        params.append(scenario_id)
+        idx += 1
+    if bundle_id:
+        scenario_ids = get_scenario_ids_for_bundle(bundle_id)
+        if scenario_ids:
+            placeholders = ", ".join(f"${idx + i}" for i in range(len(scenario_ids)))
+            filters.append(f"u.scenario_id IN ({placeholders})")
+            params.extend(scenario_ids)
+            idx += len(scenario_ids)
+    if ab_variant:
+        filters.append(f"u.ab_variant = ${idx}")
+        params.append(ab_variant)
+        idx += 1
+    where_sql = " AND ".join(filters)
+
     pool = _pool(request)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            """
+            f"""
             SELECT
-                COUNT(DISTINCT user_id) FILTER (WHERE event_type = 'bot_start')::int AS visitors,
-                COUNT(DISTINCT user_id) FILTER (WHERE event_type = 'quest_start')::int AS quest_started,
-                COUNT(DISTINCT user_id) FILTER (WHERE event_type = 'class_selected')::int AS class_selected,
-                COUNT(DISTINCT user_id) FILTER (WHERE event_type = 'weapon_selected')::int AS weapon_selected,
-                COUNT(DISTINCT user_id) FILTER (WHERE event_type = 'quest_completed')::int AS quest_completed,
-                COUNT(DISTINCT user_id) FILTER (WHERE event_type = 'workshop_registered')::int AS workshop_registered,
-                COUNT(DISTINCT user_id) FILTER (WHERE event_type = 'payment_succeeded')::int AS paid
-            FROM events
-            WHERE created_at >= NOW() - make_interval(days => $1)
+                COUNT(DISTINCT e.user_id) FILTER (WHERE e.event_type = 'bot_start')::int AS visitors,
+                COUNT(DISTINCT e.user_id) FILTER (WHERE e.event_type = 'quest_start')::int AS quest_started,
+                COUNT(DISTINCT e.user_id) FILTER (WHERE e.event_type = 'class_selected')::int AS class_selected,
+                COUNT(DISTINCT e.user_id) FILTER (WHERE e.event_type = 'weapon_selected')::int AS weapon_selected,
+                COUNT(DISTINCT e.user_id) FILTER (WHERE e.event_type = 'quest_completed')::int AS quest_completed,
+                COUNT(DISTINCT e.user_id) FILTER (WHERE e.event_type = 'workshop_registered')::int AS workshop_registered,
+                COUNT(DISTINCT e.user_id) FILTER (WHERE e.event_type = 'payment_succeeded')::int AS paid
+            FROM events e
+            JOIN users u ON u.user_id = e.user_id
+            WHERE {where_sql}
             """,
-            days_int,
+            *params,
         )
 
     visitors = int(row["visitors"] or 0)
@@ -215,7 +264,19 @@ async def get_admin_funnel(request: web.Request) -> web.Response:
         payload_steps.append({"name": name, "count": count, "conversion": conv})
         prev = count if count > 0 else prev
 
-    return _json({"ok": True, "days": days_int, "steps": payload_steps})
+    return _json(
+        {
+            "ok": True,
+            "days": days_int,
+            "filters": {
+                "client_type": client_type or None,
+                "scenario_id": scenario_id or None,
+                "bundle_id": bundle_id or None,
+                "ab_variant": ab_variant or None,
+            },
+            "steps": payload_steps,
+        }
+    )
 
 
 async def get_admin_button_stats(request: web.Request) -> web.Response:
@@ -267,6 +328,10 @@ async def get_admin_leads(request: web.Request) -> web.Response:
     offset = request.query.get("offset", "0")
     status = request.query.get("status", "").strip()
     search = request.query.get("search", "").strip()
+    client_type = request.query.get("client_type", "").strip().lower()
+    scenario_id = request.query.get("scenario_id", "").strip().lower()
+    bundle_id = request.query.get("bundle_id", "").strip().lower()
+    ab_variant = request.query.get("ab_variant", "").strip().lower()
     try:
         limit_int = max(1, min(int(limit), 500))
     except ValueError:
@@ -289,6 +354,25 @@ async def get_admin_leads(request: web.Request) -> web.Response:
             f"(u.first_name ILIKE ${idx} OR u.username ILIKE ${idx} OR COALESCE(u.phone, '') ILIKE ${idx})"
         )
         params.append(f"%{search}%")
+        idx += 1
+    if client_type:
+        clauses.append(f"u.client_type = ${idx}")
+        params.append(client_type)
+        idx += 1
+    if scenario_id:
+        clauses.append(f"u.scenario_id = ${idx}")
+        params.append(scenario_id)
+        idx += 1
+    if bundle_id:
+        scenario_ids = get_scenario_ids_for_bundle(bundle_id)
+        if scenario_ids:
+            placeholders = ", ".join(f"${idx + i}" for i in range(len(scenario_ids)))
+            clauses.append(f"u.scenario_id IN ({placeholders})")
+            params.extend(scenario_ids)
+            idx += len(scenario_ids)
+    if ab_variant:
+        clauses.append(f"u.ab_variant = ${idx}")
+        params.append(ab_variant)
         idx += 1
 
     where_sql = " AND ".join(clauses)
@@ -313,6 +397,7 @@ async def get_admin_leads(request: web.Request) -> web.Response:
             SELECT
                 u.user_id, u.username, u.first_name, u.phone, u.email,
                 u.player_class, u.weapon, u.workshop_registered, u.arena_registered,
+                u.utm_source, u.client_type, u.scenario_id, u.ab_variant,
                 u.created_at,
                 COALESCE(ls.status, 'new') AS status
             FROM users u
@@ -336,6 +421,11 @@ async def get_admin_leads(request: web.Request) -> web.Response:
                 "email": r["email"],
                 "source": source,
                 "status": r["status"],
+                "utm_source": r["utm_source"],
+                "client_channel": r["client_type"] or detect_client_channel(r["utm_source"]),
+                "client_type": r["client_type"],
+                "scenario_id": r["scenario_id"],
+                "ab_variant": r["ab_variant"],
                 "player_class": r["player_class"],
                 "weapon": r["weapon"],
                 "workshop_registered": bool(r["workshop_registered"]),
@@ -343,7 +433,19 @@ async def get_admin_leads(request: web.Request) -> web.Response:
                 "created_at": r["created_at"].isoformat() if r["created_at"] else None,
             }
         )
-    return _json({"ok": True, "total": int(total), "leads": leads})
+    return _json(
+        {
+            "ok": True,
+            "total": int(total),
+            "filters": {
+                "client_type": client_type or None,
+                "scenario_id": scenario_id or None,
+                "bundle_id": bundle_id or None,
+                "ab_variant": ab_variant or None,
+            },
+            "leads": leads,
+        }
+    )
 
 
 async def post_admin_lead_note(request: web.Request) -> web.Response:
@@ -518,6 +620,56 @@ async def post_admin_broadcast(request: web.Request) -> web.Response:
             **result,
         }
     )
+
+
+async def get_admin_bundles(request: web.Request) -> web.Response:
+    auth_error = await _require_admin_auth(request)
+    if auth_error:
+        return auth_error
+    bundles = list_bundles()
+    return _json({"ok": True, "bundles": bundles})
+
+
+async def post_admin_vk_switch(request: web.Request) -> web.Response:
+    auth_error = await _require_admin_auth(request)
+    if auth_error:
+        return auth_error
+    try:
+        payload = await request.json()
+    except Exception:
+        return _json({"ok": False, "error": "invalid_json"}, status=400)
+    scenario_id = str(payload.get("scenario_id", "")).strip().lower()
+    if not scenario_id:
+        return _json({"ok": False, "error": "scenario_id_required"}, status=400)
+
+    vk_scenario_ids = get_vk_scenario_ids()
+    if scenario_id not in vk_scenario_ids:
+        return _json(
+            {"ok": False, "error": "invalid_scenario_id", "allowed": vk_scenario_ids},
+            status=400,
+        )
+
+    pool = _pool(request)
+    async with pool.acquire() as conn:
+        old_val = await conn.fetchval(
+            "SELECT value FROM config WHERE key = 'vk_active_scenario'"
+        )
+        await conn.execute(
+            """
+            INSERT INTO config (key, value, updated_at)
+            VALUES ('vk_active_scenario', $1, NOW())
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+            """,
+            scenario_id,
+        )
+
+    logger.warning(
+        "REPACK_SWITCH vk_active_scenario from=%s to=%s",
+        old_val,
+        scenario_id,
+        extra={"from": old_val, "to": scenario_id},
+    )
+    return _json({"ok": True, "vk_active_scenario": scenario_id})
 
 
 async def get_notification_rules(request: web.Request) -> web.Response:
@@ -726,6 +878,8 @@ async def post_site_webhook(request: web.Request) -> web.Response:
 def register_admin_api_routes(app: web.Application) -> None:
     app.router.add_get("/api/admin/stats", get_admin_stats)
     app.router.add_get("/api/admin/funnel", get_admin_funnel)
+    app.router.add_get("/api/admin/bundles", get_admin_bundles)
+    app.router.add_post("/api/admin/vk/switch", post_admin_vk_switch)
     app.router.add_get("/api/admin/button-stats", get_admin_button_stats)
     app.router.add_get("/api/admin/leads", get_admin_leads)
     app.router.add_post("/api/admin/leads/{user_id}/notes", post_admin_lead_note)

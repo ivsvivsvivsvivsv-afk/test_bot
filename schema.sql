@@ -61,7 +61,12 @@ CREATE TABLE IF NOT EXISTS users (
 
     -- Источник трафика
     utm_source       VARCHAR(100),                     -- Из deep link: /start utm_tiktok
-    referrer         VARCHAR(255)
+    referrer         VARCHAR(255),
+
+    -- Omni-channel transport context
+    client_type      VARCHAR(20) DEFAULT 'telegram',   -- telegram / vk / web
+    scenario_id      VARCHAR(100) DEFAULT 'tg_main_quest',
+    ab_variant       VARCHAR(20) DEFAULT 'a'
 );
 
 -- Индексы для частых запросов воронки и дожима
@@ -79,6 +84,9 @@ CREATE INDEX IF NOT EXISTS idx_users_blocked
 
 CREATE INDEX IF NOT EXISTS idx_users_created
     ON users(created_at);
+
+CREATE INDEX IF NOT EXISTS idx_users_client_scenario
+    ON users(client_type, scenario_id, ab_variant);
 
 
 -- ============================================
@@ -150,7 +158,8 @@ INSERT INTO config (key, value) VALUES
     ('upsell_price',       '5000'),
     ('upsell_enabled',     'true'),
     ('followup_enabled',   'true'),
-    ('bot_active',         'true')
+    ('bot_active',         'true'),
+    ('vk_active_scenario', 'vk_main_quest')
 ON CONFLICT (key) DO NOTHING;
 
 

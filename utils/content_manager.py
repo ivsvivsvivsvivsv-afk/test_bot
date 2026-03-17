@@ -1,57 +1,50 @@
+"""
+ContentManager — facade over ContentRegistry for backward compatibility.
+
+All calls use bundle_id="default". New code should use ContentRegistry.get(bundle_id, key)
+with bundle_id from ScenarioContext.
+"""
+
 from __future__ import annotations
 
-import html
-import json
-from pathlib import Path
-from typing import Any, Dict
+from typing import Any
+
+from utils.content_registry import get as _registry_get
+from utils.content_registry import get_raw as _registry_get_raw
+from utils.content_registry import load_all as _registry_load_all
 
 
 class ContentManager:
     """
-    In-memory text catalog loaded from JSON.
+    Facade over ContentRegistry. Uses bundle_id="default".
     """
 
-    _instance: "ContentManager | None" = None
-
-    def __init__(self, content: Dict[str, Any]):
-        self._content = content
+    _loaded: bool = False
 
     @classmethod
-    def load(cls, path: str) -> "ContentManager":
-        file_path = Path(path)
-        content = json.loads(file_path.read_text(encoding="utf-8"))
-        cls._instance = cls(content)
-        return cls._instance
+    def load(cls, path: str = "content/texts.json") -> "ContentManager":
+        """Initialize ContentRegistry. Path ignored for backward compat (legacy → default)."""
+        _registry_load_all()
+        cls._loaded = True
+        return cls
 
     @classmethod
     def instance(cls) -> "ContentManager":
-        if cls._instance is None:
+        if not cls._loaded:
             raise RuntimeError("ContentManager is not loaded. Call ContentManager.load() first.")
-        return cls._instance
+        return cls
 
     @classmethod
     def reset(cls) -> None:
-        cls._instance = None
+        from utils.content_registry import reset as _registry_reset
+
+        _registry_reset()
+        cls._loaded = False
 
     @classmethod
     def get(cls, key: str, **kwargs: Any) -> str:
-        manager = cls.instance()
-        value = manager._content.get(key)
-        if value is None:
-            raise KeyError(f"Missing text key: {key}")
-        if not isinstance(value, str):
-            raise TypeError(f"Text key '{key}' is not a string")
-        if not kwargs:
-            return value
-        escaped = {
-            field_name: html.escape(str(field_value), quote=True)
-            for field_name, field_value in kwargs.items()
-        }
-        return value.format(**escaped)
+        return _registry_get("default", key, **kwargs)
 
     @classmethod
     def get_raw(cls, key: str) -> Any:
-        manager = cls.instance()
-        if key not in manager._content:
-            raise KeyError(f"Missing content key: {key}")
-        return manager._content[key]
+        return _registry_get_raw("default", key)

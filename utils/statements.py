@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -23,12 +24,17 @@ logger = logging.getLogger(__name__)
 
 STATEMENTS_DIR = Path(__file__).parent.parent / "statements"
 REDIS_TTL = 3600  # 1 hour
+RAM_TTL = 300  # 5 minutes in-process cache
+DEFAULT_BUNDLE = "default"
 
 ROUND_NAMES: Dict[int, str] = {
     1: "🐉 ГОЛОВА ПЕРВАЯ: ХАОС",
     2: "🐉 ГОЛОВА ВТОРАЯ: СОМНЕНИЕ",
     3: "🐉 ГОЛОВА ТРЕТЬЯ: ИСТИНА",
 }
+
+_ram_cache: Dict[str, tuple[float, Dict[int, List["Statement"]]]] = {}
+# Key format: "{bundle_id}:{weapon}" for per-bundle cache
 
 
 @dataclass
@@ -80,12 +86,14 @@ def _parse_file(filepath: Path) -> Dict[int, List[Statement]]:
 # ── Redis-cached loader ─────────────────────────────────────
 
 
-def _redis_key(weapon: str) -> str:
-    return f"statements:{weapon}"
+def _redis_key(weapon: str, bundle_id: str = DEFAULT_BUNDLE) -> str:
+    return f"statements:{bundle_id}:{weapon}"
 
 
-async def _load_from_redis(redis_conn, weapon: str) -> Optional[Dict[int, List[Statement]]]:
-    raw = await redis_conn.get(_redis_key(weapon))
+async def _load_from_redis(
+    redis_conn, weapon: str, bundle_id: str = DEFAULT_BUNDLE
+) -> Optional[Dict[int, List[Statement]]]:
+    raw = await redis_conn.get(_redis_key(weapon, bundle_id))
     if raw is None:
         return None
     try:
@@ -100,37 +108,53 @@ async def _load_from_redis(redis_conn, weapon: str) -> Optional[Dict[int, List[S
 
 
 async def _save_to_redis(
-    redis_conn, weapon: str, stmts: Dict[int, List[Statement]]
+    redis_conn, weapon: str, stmts: Dict[int, List[Statement]], bundle_id: str = DEFAULT_BUNDLE
 ) -> None:
     data = {str(k): [asdict(s) for s in v] for k, v in stmts.items()}
     try:
-        await redis_conn.setex(_redis_key(weapon), REDIS_TTL, json.dumps(data, ensure_ascii=False))
+        await redis_conn.setex(
+            _redis_key(weapon, bundle_id), REDIS_TTL, json.dumps(data, ensure_ascii=False)
+        )
     except Exception:
         logger.warning("Failed to cache statements:%s in Redis", weapon)
 
 
 async def load_statements(
-    weapon: str, redis_conn=None
+    weapon: str, redis_conn=None, bundle_id: str = DEFAULT_BUNDLE
 ) -> Dict[int, List[Statement]]:
     """
     Return ``{level: [Statement, ...]}`` for the given weapon.
-    Uses Redis as a cache layer when available.
+    Uses statements/{bundle_id}/{weapon}.txt with fallback to statements/{weapon}.txt.
+    Redis cache key includes bundle_id.
     """
+    cache_key = f"{bundle_id}:{weapon}"
+    now = time.monotonic()
+    cached_ram = _ram_cache.get(cache_key)
+    if cached_ram and cached_ram[0] > now:
+        return cached_ram[1]
+
     if redis_conn is not None:
-        cached = await _load_from_redis(redis_conn, weapon)
+        cached = await _load_from_redis(redis_conn, weapon, bundle_id)
         if cached is not None:
+            _ram_cache[cache_key] = (now + RAM_TTL, cached)
             return cached
 
-    filepath = STATEMENTS_DIR / f"{weapon}.txt"
+    # Per-bundle: statements/{bundle_id}/{weapon}.txt
+    bundle_dir = STATEMENTS_DIR / bundle_id
+    filepath = bundle_dir / f"{weapon}.txt" if bundle_dir.exists() else Path()
     if not filepath.exists():
-        logger.warning("No file for weapon=%s, falling back to other.txt", weapon)
-        filepath = STATEMENTS_DIR / "other.txt"
+        # Fallback: statements/{weapon}.txt
+        filepath = STATEMENTS_DIR / f"{weapon}.txt"
+    if not filepath.exists():
+        logger.warning("No file for weapon=%s bundle=%s, falling back to other.txt", weapon, bundle_id)
+        filepath = bundle_dir / "other.txt" if bundle_dir.exists() else STATEMENTS_DIR / "other.txt"
 
     stmts = _parse_file(filepath)
 
     if redis_conn is not None:
-        await _save_to_redis(redis_conn, weapon, stmts)
+        await _save_to_redis(redis_conn, weapon, stmts, bundle_id)
 
+    _ram_cache[cache_key] = (now + RAM_TTL, stmts)
     return stmts
 
 
@@ -177,9 +201,9 @@ async def get_statement_for_miniquest(
 
 
 async def get_statement_for_round(
-    weapon: str, round_num: int, redis_conn=None
+    weapon: str, round_num: int, redis_conn=None, bundle_id: str = DEFAULT_BUNDLE
 ) -> Statement:
-    stmts = await load_statements(weapon, redis_conn)
+    stmts = await load_statements(weapon, redis_conn, bundle_id)
     pool = stmts.get(round_num, [])
     if not pool:
         logger.warning("No statements for weapon=%s round=%d, using fallback", weapon, round_num)
@@ -213,6 +237,7 @@ def format_round_result(
     round_num: int,
     score: int,
     statement: Statement,
+    bundle_id: str = DEFAULT_BUNDLE,
 ) -> str:
     """Build the rich post-answer message with Hydra head text."""
     if is_correct:
@@ -220,8 +245,9 @@ def format_round_result(
     else:
         head_key = f"head_round{round_num}_alive"
 
-    from utils.content_manager import ContentManager
-    head_text = ContentManager.get(head_key)
+    from utils.content_registry import get as content_get
+
+    head_text = content_get(bundle_id, head_key)
 
     truth_label = "✓ ПРАВДА" if statement.is_truth else "✗ ЛОЖЬ"
 
