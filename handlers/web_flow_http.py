@@ -360,6 +360,7 @@ async def post_web_session_start(request: web.Request) -> web.Response:
         "client_type": scenario_ctx.client_type,
         "scenario_id": scenario_ctx.scenario_id,
         "ab_variant": scenario_ctx.ab_variant,
+        "bundle_id": scenario_ctx.bundle_id,
         "utm_source": utm_source,
         "step": "welcome",
         "state_version": 1,

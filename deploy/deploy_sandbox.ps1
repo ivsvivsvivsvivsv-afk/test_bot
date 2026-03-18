@@ -61,11 +61,13 @@ if [ -f deploy/nginx.sandbox.conf ]; then
   sudo nginx -t && sudo systemctl reload nginx
 fi
 
-# Apply migrations (patch4 vk_active_scenario)
-if [ -f migrations/patch4_001_vk_active_scenario.sql ]; then
-  source .env 2>/dev/null || true
-  PGPASSWORD="${DB_PASSWORD:-}" psql -U hydra -d hydra_bot_sandbox -h localhost -f migrations/patch4_001_vk_active_scenario.sql 2>/dev/null || true
-fi
+# Apply migrations (patch3 client_scenarios, patch4 vk_active_scenario)
+source .env 2>/dev/null || true
+for m in migrations/patch3_001_client_scenarios.sql migrations/patch4_001_vk_active_scenario.sql; do
+  if [ -f "$m" ]; then
+    PGPASSWORD="${DB_PASSWORD:-}" psql -U hydra -d hydra_bot_sandbox -h localhost -f "$m" 2>/dev/null || true
+  fi
+done
 
 if [ -f .env ]; then
   echo "sandbox:hydra-sandbox" | sudo bash deploy/guarded_deploy.sh --env sandbox --project-dir "$SANDBOX_DIR"
