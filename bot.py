@@ -38,6 +38,7 @@ from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 
 from config import (
+    APP_ENV,
     BOT_TOKEN,
     WEBHOOK_HOST,
     WEBHOOK_PATH,
@@ -264,10 +265,26 @@ async def handle_web_v1_health(_request: web.Request) -> web.Response:
     )
 
 
+@web.middleware
+async def _sandbox_error_middleware(request: web.Request, handler):
+    """In sandbox, return 500 details as JSON for debugging."""
+    try:
+        return await handler(request)
+    except Exception as exc:
+        logger.exception("Unhandled error in %s %s", request.method, request.path)
+        if APP_ENV == "sandbox":
+            import traceback
+            return web.json_response(
+                {"error": str(exc), "type": type(exc).__name__, "traceback": traceback.format_exc()},
+                status=500,
+            )
+        raise
+
+
 def create_app() -> web.Application:
     from config import REDIS_URL
 
-    application = web.Application()
+    application = web.Application(middlewares=[_sandbox_error_middleware])
     application[REDIS_URL_KEY] = REDIS_URL
 
     application.on_startup.append(on_startup)
