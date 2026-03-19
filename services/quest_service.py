@@ -28,6 +28,9 @@ async def get_or_create_user(
     username: Optional[str],
     first_name: Optional[str],
     source: Optional[str] = None,
+    client_type: str = "telegram",
+    scenario_id: str = "tg_main_quest",
+    ab_variant: str = "a",
 ) -> Dict[str, Any]:
     """
     Return existing user row or INSERT a new one.
@@ -36,11 +39,15 @@ async def get_or_create_user(
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO users (user_id, username, first_name, utm_source)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO users (user_id, username, first_name, utm_source, client_type, scenario_id, ab_variant)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT (user_id) DO UPDATE
                 SET username   = EXCLUDED.username,
                     first_name = EXCLUDED.first_name,
+                    utm_source = COALESCE(users.utm_source, EXCLUDED.utm_source),
+                    client_type = COALESCE(users.client_type, EXCLUDED.client_type),
+                    scenario_id = COALESCE(users.scenario_id, EXCLUDED.scenario_id),
+                    ab_variant = COALESCE(users.ab_variant, EXCLUDED.ab_variant),
                     is_blocked = FALSE
             RETURNING *
             """,
@@ -48,6 +55,9 @@ async def get_or_create_user(
             username,
             first_name,
             source,
+            client_type,
+            scenario_id,
+            ab_variant,
         )
     return dict(row)
 
